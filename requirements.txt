@@ -1,0 +1,14 @@
+# Core dependencies for CartPole standalone project
+
+# Deep learning framework (required by Isaac Gym)
+torch>=1.8.0
+
+# Numerical computing
+numpy>=1.19.0
+
+# Plotting and visualization
+matplotlib>=3.3.0
+
+# Note: Isaac Gym and IsaacGymEnvs must be installed separately
+# from NVIDIA's Isaac Gym preview release
+# See: https://developer.nvidia.com/isaac-gym
