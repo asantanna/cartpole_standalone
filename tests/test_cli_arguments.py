@@ -170,7 +170,7 @@ class TestHyperparamSearchCLI:
             parser.add_argument('--method', type=str, choices=['grid', 'random'], default='random')
             parser.add_argument('--n-trials', type=int, default=30)
             parser.add_argument('--num-episodes', type=int, default=100)
-            parser.add_argument('--output', type=str, default='search_results.json')
+            # --output argument was removed
             parser.add_argument('--quiet', action='store_true')
             parser.add_argument('--use-refined', action='store_true')
             
@@ -179,7 +179,7 @@ class TestHyperparamSearchCLI:
             assert args.method == 'random'
             assert args.n_trials == 30
             assert args.num_episodes == 100
-            assert args.output == 'search_results.json'
+            # --output argument was removed
             assert args.quiet == False
             assert args.use_refined == False
             

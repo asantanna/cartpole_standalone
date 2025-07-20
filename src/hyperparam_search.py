@@ -228,8 +228,7 @@ def main():
                         help='Number of trials for random search')
     parser.add_argument('--num-episodes', type=int, default=100,
                         help='Number of episodes per trial')
-    parser.add_argument('--output', type=str, default='search_results.json',
-                        help='Output file for results')
+    # Removed --output argument as results are saved in runs/search/<timestamp>/
     parser.add_argument('--quiet', action='store_true',
                         help='Suppress training output from individual runs')
     parser.add_argument('--use-refined', action='store_true',
@@ -280,17 +279,8 @@ def main():
             param_ranges, args.n_trials, args.num_episodes, show_output
         )
     
-    # Save results
-    output = {
-        'method': args.method,
-        'num_episodes': args.num_episodes,
-        'results': results,
-        'best_params': best_params,
-        'best_score': best_score
-    }
-    
-    with open(args.output, 'w') as f:
-        json.dump(output, f, indent=2)
+    # Results are already saved in the search directory
+    # No need for duplicate output file
     
     print(f"\n{'='*80}")
     print(f"SEARCH COMPLETE!")
@@ -306,7 +296,7 @@ def main():
                     print(f"  {k:15s}: {v:.4f}")
             else:
                 print(f"  {k:15s}: {v}")
-    print(f"\nResults saved to {args.output}")
+    # Results location already printed above
     
     # Show top 5 configurations
     if results:
