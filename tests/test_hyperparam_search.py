@@ -375,3 +375,109 @@ class TestSearchIntegration:
                 
         finally:
             os.chdir(original_cwd)
+
+
+class TestRefinementFeatures:
+    """Test new refinement features."""
+    
+    def test_calculate_shrunken_ranges(self, tmp_path):
+        """Test shrink-hparam-space refinement calculation."""
+        from src.hyperparam_search import calculate_shrunken_ranges
+        
+        # Create mock results
+        results = [
+            {'params': {'lr_actor': 1e-4, 'lr_critic': 2e-4, 'noise_std': 0.05}, 'score': 100},
+            {'params': {'lr_actor': 2e-4, 'lr_critic': 3e-4, 'noise_std': 0.1}, 'score': 90},
+            {'params': {'lr_actor': 5e-5, 'lr_critic': 1e-4, 'noise_std': 0.02}, 'score': 80},
+            {'params': {'lr_actor': 3e-4, 'lr_critic': 5e-4, 'noise_std': 0.2}, 'score': 70},
+            {'params': {'lr_actor': 1e-5, 'lr_critic': 1e-5, 'noise_std': 0.01}, 'score': 60},
+        ]
+        
+        # Calculate refined ranges (top 40% = 2 runs)
+        new_ranges = calculate_shrunken_ranges(results, top_percent=0.4, expand=0.2)
+        
+        # Check that ranges are based on top 2 runs (scores 100 and 90)
+        # lr_actor: min=1e-4, max=2e-4
+        assert new_ranges['lr_actor'][0] < 1e-4  # expanded below min
+        assert new_ranges['lr_actor'][1] > 2e-4  # expanded above max
+        assert new_ranges['lr_actor'][0] > 0      # still positive
+        
+    def test_sample_near_top_performer(self):
+        """Test probe-nearby sampling."""
+        from src.hyperparam_search import sample_near_top_performer
+        
+        # Create mock top runs
+        top_runs = [
+            {'params': {'lr_actor': 1e-4, 'lr_critic': 2e-4, 'lambda_actor': 0.9, 
+                       'gamma': 0.95, 'noise_std': 0.05, 'reward_scale': 10.0,
+                       'lambda_critic': 0.92, 'td_clip': 5.0}, 'score': 100}
+        ]
+        
+        # Sample near top performer
+        new_params = sample_near_top_performer(top_runs, noise_level=0.3)
+        
+        # Check that new params are close to original
+        orig_params = top_runs[0]['params']
+        
+        # Log-scale params should be within multiplicative range
+        assert 0.7 * orig_params['lr_actor'] <= new_params['lr_actor'] <= 1.3 * orig_params['lr_actor']
+        assert 0.7 * orig_params['noise_std'] <= new_params['noise_std'] <= 1.3 * orig_params['noise_std']
+        
+        # Linear params should be clamped properly
+        assert 0.0 <= new_params['lambda_actor'] <= 0.999
+        assert 0.0 <= new_params['gamma'] <= 0.999
+        
+    def test_load_previous_results(self, tmp_path):
+        """Test loading previous search results."""
+        from src.hyperparam_search import load_previous_results
+        
+        # Create a mock search results file
+        search_dir = tmp_path / "test_search"
+        search_dir.mkdir()
+        
+        results_data = {
+            'method': 'random',
+            'num_episodes': 100,
+            'results': [
+                {'params': {'lr_actor': 1e-4}, 'score': 100, 'run_id': 'test1'},
+                {'params': {'lr_actor': 2e-4}, 'score': 90, 'run_id': 'test2'}
+            ],
+            'best_params': {'lr_actor': 1e-4},
+            'best_score': 100
+        }
+        
+        with open(search_dir / 'search_results.json', 'w') as f:
+            json.dump(results_data, f)
+        
+        # Load results
+        results, best_params, best_score = load_previous_results(str(search_dir))
+        
+        assert len(results) == 2
+        assert best_score == 100
+        assert best_params['lr_actor'] == 1e-4
+        
+    def test_refine_argument_parsing(self):
+        """Test that refinement arguments parse correctly."""
+        import argparse
+        from src.hyperparam_search import main
+        
+        # Create parser like in main
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--refine', type=str, default=None)
+        parser.add_argument('--refine-method', type=str, 
+                           choices=['shrink-hparam-space', 'probe-nearby'],
+                           default='shrink-hparam-space')
+        parser.add_argument('--refine-top-percent', type=float, default=0.2)
+        parser.add_argument('--refine-noise', type=float, default=0.3)
+        parser.add_argument('--refine-expand', type=float, default=0.2)
+        
+        # Test parsing
+        args = parser.parse_args(['--refine', 'runs/search/test', 
+                                 '--refine-method', 'probe-nearby',
+                                 '--refine-noise', '0.5'])
+        
+        assert args.refine == 'runs/search/test'
+        assert args.refine_method == 'probe-nearby'
+        assert args.refine_noise == 0.5
+        assert args.refine_top_percent == 0.2  # default
+        assert args.refine_expand == 0.2       # default
