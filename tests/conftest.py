@@ -17,6 +17,51 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import isaacgym
 import isaacgymenvs
 import torch
+import subprocess
+from functools import wraps
+import traceback
+import tempfile
+import pickle
+
+
+def run_in_subprocess(func):
+    """
+    Decorator to run a test in a subprocess with proper Isaac Gym isolation.
+    This prevents segmentation faults when running multiple Isaac Gym tests.
+    """
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        # Get the test module and test name
+        test_module = func.__module__
+        test_class = args[0].__class__.__name__ if args and hasattr(args[0], '__class__') else None
+        test_name = func.__name__
+        
+        # Build the pytest command
+        if test_class:
+            test_path = f"tests/{test_module.replace('.', '/')}.py::{test_class}::{test_name}"
+        else:
+            test_path = f"tests/{test_module.replace('.', '/')}.py::{test_name}"
+        
+        cmd = [sys.executable, '-m', 'pytest', test_path, '-xvs']
+        
+        # Run test in subprocess
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=os.environ.copy(),
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        
+        # Check result
+        if proc.returncode != 0:
+            pytest.fail(f"Test failed in subprocess:\n"
+                       f"Command: {' '.join(cmd)}\n"
+                       f"Return code: {proc.returncode}\n"
+                       f"STDOUT:\n{proc.stdout}\n"
+                       f"STDERR:\n{proc.stderr}")
+    
+    return wrapper
 
 
 def pytest_configure(config):

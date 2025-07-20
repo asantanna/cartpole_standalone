@@ -14,12 +14,14 @@ from src.cartpole import train, get_run_directory, ensure_directory_exists, reso
 from src.hyperparam_search import random_search, grid_search
 from src.visualize_learning import load_metrics, plot_single_run
 from src.analyze_results import analyze_results
+from conftest import run_in_subprocess
 
 
 class TestSingleRunWorkflow:
     """Test complete single training run workflow."""
     
     @pytest.mark.slow
+    @run_in_subprocess
     def test_complete_single_run(self, tmp_path, mock_args):
         """Test training → metrics → checkpoint flow."""
         original_cwd = os.getcwd()
@@ -66,7 +68,8 @@ class TestSingleRunWorkflow:
         finally:
             os.chdir(original_cwd)
             
-    @pytest.mark.skip(reason="Multiple Isaac Gym environments cause segmentation fault")
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_multiple_sequential_runs(self, tmp_path, mock_args):
         """Test multiple training runs with different configurations."""
         original_cwd = os.getcwd()
@@ -113,6 +116,7 @@ class TestSearchWorkflow:
     """Test hyperparameter search workflow."""
     
     @pytest.mark.slow
+    @run_in_subprocess
     def test_small_search_to_visualization(self, tmp_path):
         """Test search → analysis → visualization workflow."""
         original_cwd = os.getcwd()
@@ -169,6 +173,8 @@ class TestSearchWorkflow:
         finally:
             os.chdir(original_cwd)
             
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_grid_search_integration(self, tmp_path):
         """Test grid search with directory structure."""
         original_cwd = os.getcwd()
@@ -211,7 +217,8 @@ class TestSearchWorkflow:
 class TestCheckpointWorkflow:
     """Test checkpoint save/load workflow."""
     
-    @pytest.mark.slow  
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_checkpoint_save_load_continue(self, tmp_path, mock_args):
         """Test save → load → continue training workflow."""
         original_cwd = os.getcwd()
@@ -383,6 +390,7 @@ class TestEndToEndScenarios:
     """Test realistic end-to-end scenarios."""
     
     @pytest.mark.slow
+    @run_in_subprocess
     def test_research_workflow(self, tmp_path, mock_args):
         """Test typical research workflow: explore → refine → evaluate."""
         original_cwd = os.getcwd()

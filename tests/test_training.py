@@ -3,12 +3,13 @@
 Tests for the training loop with real Isaac Gym environment.
 """
 import pytest
-import torch
 import os
 import json
 import glob
 
 from src.cartpole import make_env, train, ActorCritic
+from conftest import run_in_subprocess
+import torch  # Import torch after cartpole (which imports isaacgym)
 
 
 class TestIsaacGymEnvironment:
@@ -22,6 +23,8 @@ class TestIsaacGymEnvironment:
         except ImportError:
             pytest.fail("Isaac Gym is not installed. Please install it before running tests.")
             
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_make_env(self):
         """Test environment creation."""
         env = make_env(headless=True)
@@ -43,6 +46,8 @@ class TestIsaacGymEnvironment:
         assert len(obs.shape) == 2  # (num_envs, obs_dim)
         assert obs.shape[0] == 1  # Single environment
         
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_env_step(self):
         """Test environment step function."""
         env = make_env(headless=True)
@@ -68,6 +73,7 @@ class TestTrainingFunction:
     """Test the main training function."""
     
     @pytest.mark.slow
+    @run_in_subprocess
     def test_train_minimal_episodes(self, tmp_path, mock_args):
         """Test training with minimal episodes."""
         # Change to temp directory
@@ -85,6 +91,8 @@ class TestTrainingFunction:
         finally:
             os.chdir(original_cwd)
             
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_train_with_metrics(self, tmp_path, mock_args):
         """Test training with metrics saving."""
         original_cwd = os.getcwd()
@@ -114,6 +122,8 @@ class TestTrainingFunction:
         finally:
             os.chdir(original_cwd)
             
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_train_with_checkpoint(self, tmp_path, mock_args):
         """Test training with checkpoint saving."""
         original_cwd = os.getcwd()
@@ -140,6 +150,8 @@ class TestTrainingFunction:
         finally:
             os.chdir(original_cwd)
             
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_train_load_checkpoint(self, tmp_path, mock_args):
         """Test loading checkpoint and continuing training."""
         original_cwd = os.getcwd()
@@ -169,6 +181,8 @@ class TestTrainingFunction:
         finally:
             os.chdir(original_cwd)
             
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_train_best_config(self, tmp_path, mock_args):
         """Test training with best configuration."""
         original_cwd = os.getcwd()
@@ -193,6 +207,8 @@ class TestTrainingFunction:
         finally:
             os.chdir(original_cwd)
             
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_training_mode_override(self, tmp_path, mock_args):
         """Test training mode override."""
         original_cwd = os.getcwd()
@@ -227,6 +243,7 @@ class TestTrainingFunction:
             os.chdir(original_cwd)
             
     @pytest.mark.slow
+    @run_in_subprocess
     def test_best_model_saving(self, tmp_path, mock_args):
         """Test automatic best model saving during training."""
         original_cwd = os.getcwd()
@@ -254,6 +271,8 @@ class TestTrainingFunction:
 class TestTrainingEdgeCases:
     """Test edge cases and error handling."""
     
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_train_without_args(self, tmp_path):
         """Test training with no args (defaults)."""
         original_cwd = os.getcwd()
@@ -267,6 +286,8 @@ class TestTrainingEdgeCases:
         finally:
             os.chdir(original_cwd)
             
+    @pytest.mark.slow
+    @run_in_subprocess
     def test_checkpoint_resolution(self, tmp_path, mock_args):
         """Test checkpoint path resolution."""
         original_cwd = os.getcwd()
@@ -302,7 +323,9 @@ class TestTrainingEdgeCases:
         finally:
             os.chdir(original_cwd)
             
+    @pytest.mark.slow
     @pytest.mark.gpu
+    @run_in_subprocess
     def test_gpu_training(self, gpu_available, tmp_path, mock_args):
         """Test training on GPU if available."""
         if not gpu_available:
