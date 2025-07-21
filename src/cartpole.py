@@ -11,7 +11,7 @@ import os
 from datetime import datetime
 
 #─── Directory helpers ─────────────────────────────────────────────────────────
-def get_run_directory(run_type='single', run_id=None):
+def get_run_directory(run_type='singles', run_id=None):
     """Generate run directory path."""
     if run_id is None:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -31,12 +31,12 @@ def resolve_checkpoint_path(filepath):
     if os.path.exists(filepath):
         return filepath
     
-    # Check in runs/single/*/
+    # Check in runs/singles/*/
     import glob
     patterns = [
-        f"runs/single/*/{os.path.basename(filepath)}",
-        f"runs/single/*/{filepath}",
-        f"runs/search/*/*/{os.path.basename(filepath)}",
+        f"runs/singles/*/{os.path.basename(filepath)}",
+        f"runs/singles/*/{filepath}",
+        f"runs/searches/*/*/{os.path.basename(filepath)}",
     ]
     
     for pattern in patterns:
@@ -155,7 +155,16 @@ def train(headless=True, num_episodes=500, args=None):
     # Set up run directory
     run_dir = None
     if args and (args.save_checkpoint or args.save_metrics):
-        run_dir = get_run_directory(run_type='single', run_id=args.run_id if args.run_id != 'default' else None)
+        if hasattr(args, 'out_dir') and args.out_dir:
+            # Use custom output directory
+            run_id = args.run_id if args.run_id != 'default' else None
+            if run_id is None:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                run_id = f"train_{timestamp}"
+            run_dir = os.path.join(args.out_dir, run_id)
+        else:
+            # Default behavior
+            run_dir = get_run_directory(run_type='singles', run_id=args.run_id if args.run_id != 'default' else None)
         ensure_directory_exists(run_dir)
         print(f"Run directory: {run_dir}")
     
@@ -330,6 +339,8 @@ if __name__ == "__main__":
                         help='Save training metrics to file')
     parser.add_argument('--run-id', type=str, default='default',
                         help='Run identifier for saving metrics')
+    parser.add_argument('--out-dir', type=str, default=None,
+                        help='Output directory for saving results (default: runs/singles)')
     parser.add_argument('--best-config', action='store_true',
                         help='Use the best hyperparameters from search')
     # Checkpoint arguments

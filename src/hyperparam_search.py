@@ -7,7 +7,6 @@ import random
 import argparse
 from datetime import datetime
 import os
-import shutil
 import sys
 
 try:
@@ -15,7 +14,7 @@ try:
 except ImportError:
     from .cartpole import get_run_directory, ensure_directory_exists
 
-def run_experiment(params, run_id, num_episodes=100, show_output=True, refinement_info=None):
+def run_experiment(params, run_id, num_episodes=100, show_output=True, refinement_info=None, out_dir=None):
     """Run a single experiment with given hyperparameters."""
     cmd = [
         sys.executable, 'src/cartpole.py',
@@ -31,6 +30,10 @@ def run_experiment(params, run_id, num_episodes=100, show_output=True, refinemen
         '--save-metrics',
         '--run-id', run_id
     ]
+    
+    # Add output directory if specified
+    if out_dir:
+        cmd.extend(['--out-dir', out_dir])
     
     print(f"\n{'='*80}")
     print(f"EXPERIMENT: {run_id}")
@@ -86,8 +89,12 @@ def run_experiment(params, run_id, num_episodes=100, show_output=True, refinemen
             returncode = result.returncode
         
         if returncode == 0:
-            # Load the metrics file from runs directory
-            metrics_file = os.path.join('runs', 'single', run_id, 'metrics.json')
+            # Load the metrics file from the output directory
+            if out_dir:
+                metrics_file = os.path.join(out_dir, run_id, 'metrics.json')
+            else:
+                metrics_file = os.path.join('runs', 'singles', run_id, 'metrics.json')
+            
             if os.path.exists(metrics_file):
                 with open(metrics_file, 'r') as f:
                     metrics = json.load(f)
@@ -112,8 +119,8 @@ def grid_search(param_grid, num_episodes=100, show_output=True, search_id=None):
     """Perform grid search over hyperparameter combinations."""
     # Create search directory
     if search_id is None:
-        search_id = f"grid_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    search_dir = os.path.join('runs', 'search', search_id)
+        search_id = f"search_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    search_dir = os.path.join('runs', 'searches', search_id)
     os.makedirs(search_dir, exist_ok=True)
     print(f"Search directory: {search_dir}")
     
@@ -135,15 +142,9 @@ def grid_search(param_grid, num_episodes=100, show_output=True, search_id=None):
         run_id = f"grid_{i}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         print(f"\n[{i+1}/{len(combinations)}] Starting experiment...")
-        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output)
+        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, out_dir=search_dir)
         
         if score is not None:
-            # Copy metrics to search directory
-            trial_dir = os.path.join(search_dir, run_id)
-            os.makedirs(trial_dir, exist_ok=True)
-            if metrics_file and os.path.exists(metrics_file):
-                shutil.copy2(metrics_file, os.path.join(trial_dir, 'metrics.json'))
-            
             results.append({
                 'params': params,
                 'score': score,
@@ -181,8 +182,8 @@ def random_search(param_ranges, n_trials=50, num_episodes=100, show_output=True,
     """Perform random search over hyperparameter ranges."""
     # Create search directory
     if search_id is None:
-        search_id = f"random_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-    search_dir = os.path.join('runs', 'search', search_id)
+        search_id = f"search_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    search_dir = os.path.join('runs', 'searches', search_id)
     os.makedirs(search_dir, exist_ok=True)
     print(f"Search directory: {search_dir}")
     
@@ -208,14 +209,9 @@ def random_search(param_ranges, n_trials=50, num_episodes=100, show_output=True,
         run_id = f"random_{i}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         print(f"\n[{i+1}/{n_trials}] Starting experiment...")
-        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, refinement_info)
+        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, refinement_info, out_dir=search_dir)
         
         if score is not None:
-            # Copy metrics to search directory
-            trial_dir = os.path.join(search_dir, run_id)
-            os.makedirs(trial_dir, exist_ok=True)
-            if metrics_file and os.path.exists(metrics_file):
-                shutil.copy2(metrics_file, os.path.join(trial_dir, 'metrics.json'))
             results.append({
                 'params': params,
                 'score': score,
@@ -266,9 +262,9 @@ def probe_nearby_search(top_runs, n_trials, num_episodes=100, show_output=True, 
         results, best_params, best_score, search_dir
     """
     if search_id is None:
-        search_id = f"probe_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        search_id = f"search_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
-    search_dir = get_run_directory('search', search_id)
+    search_dir = get_run_directory('searches', search_id)
     ensure_directory_exists(search_dir)
     
     results = []
@@ -296,15 +292,9 @@ def probe_nearby_search(top_runs, n_trials, num_episodes=100, show_output=True, 
         run_id = f"probe_{i}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         print(f"\n[{i+1}/{n_trials}] Starting experiment...")
         
-        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, refinement_info)
+        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, refinement_info, out_dir=search_dir)
         
         if score is not None:
-            # Copy metrics to search directory
-            trial_dir = os.path.join(search_dir, run_id)
-            os.makedirs(trial_dir, exist_ok=True)
-            if metrics_file and os.path.exists(metrics_file):
-                shutil.copy2(metrics_file, os.path.join(trial_dir, 'metrics.json'))
-            
             results.append({
                 'params': params,
                 'score': score,

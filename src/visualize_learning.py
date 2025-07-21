@@ -220,7 +220,7 @@ def plot_best_run_details(metrics_file):
 
 def main():
     parser = argparse.ArgumentParser(description='Visualize CartPole learning curves')
-    parser.add_argument('input', type=str, nargs='?', help='Input metrics file or pattern (e.g., "runs/single/*/metrics.json")')
+    parser.add_argument('input', type=str, nargs='?', help='Input metrics file or pattern (e.g., "runs/singles/*/metrics.json")')
     parser.add_argument('--search-results', type=str, help='Search results file for hyperparameter analysis')
     parser.add_argument('--output', type=str, help='Output plot file (default: show plot)')
     parser.add_argument('--best-only', action='store_true', help='Only show the best run when using wildcard')
@@ -284,9 +284,9 @@ def main():
     
     else:
         print("Usage examples:")
-        print("  python visualize_learning.py runs/single/*/metrics.json")
-        print("  python visualize_learning.py runs/single/train_20250720_123456/metrics.json")
-        print("  python visualize_learning.py runs/search/*/search_results.json --search-results")
+        print("  python visualize_learning.py runs/singles/*/metrics.json")
+        print("  python visualize_learning.py runs/singles/train_20250720_123456/metrics.json")
+        print("  python visualize_learning.py runs/searches/*/search_results.json --search-results")
         print("  python visualize_learning.py 'runs/**/*.json' --best-only")
         return
     

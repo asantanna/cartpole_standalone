@@ -30,51 +30,51 @@ python src/cartpole.py --num-episodes 200
 
 # Train and save checkpoint with metrics
 python src/cartpole.py --best-config --save-checkpoint model.pt --save-metrics
-# Creates runs/single/<timestamp>/model.pt and runs/single/<timestamp>/metrics.json
+# Creates runs/singles/<timestamp>/model.pt and runs/singles/<timestamp>/metrics.json
 
 # Load checkpoint for evaluation (no learning)
 python src/cartpole.py --load-checkpoint model.pt
-# Automatically searches runs/single/*/model.pt if not found
+# Automatically searches runs/singles/*/model.pt if not found
 
 # Load checkpoint but continue training
 python src/cartpole.py --load-checkpoint model.pt --training-mode true
 
 # Train with automatic best model saving
 python src/cartpole.py --best-config --save-checkpoint training.pt --save-metrics
-# Creates runs/single/<timestamp>/training.pt (final) and training_best.pt (best avg return)
+# Creates runs/singles/<timestamp>/training.pt (final) and training_best.pt (best avg return)
 ```
 
 ### Hyperparameter Search
 ```bash
 # Random search with refined parameter space
 python src/hyperparam_search.py --method random --n-trials 20 --use-refined
-# Creates runs/search/random_<timestamp>/ with all results
+# Creates runs/searches/search_<timestamp>/ with all results
 
 # Grid search
 python src/hyperparam_search.py --method grid --use-refined
-# Creates runs/search/grid_<timestamp>/ with all results
+# Creates runs/searches/search_<timestamp>/ with all results
 
 # Quick test search
 python src/hyperparam_search.py --n-trials 5 --num-episodes 50
-# Results saved in runs/search/<timestamp>/search_results.json
+# Results saved in runs/searches/search_<timestamp>/search_results.json
 ```
 
 ### Visualization
 ```bash
 # Plot single learning curve
-python src/visualize_learning.py runs/single/train_20250720_123456/metrics.json
+python src/visualize_learning.py runs/singles/train_20250720_123456/metrics.json
 
 # Compare multiple runs (automatic for wildcards)
-python src/visualize_learning.py "runs/single/*/metrics.json"
+python src/visualize_learning.py "runs/singles/*/metrics.json"
 
 # Show only the best run from multiple runs
-python src/visualize_learning.py "runs/single/*/metrics.json" --best-only
+python src/visualize_learning.py "runs/singles/*/metrics.json" --best-only
 
 # Force comparison mode for single file
-python src/visualize_learning.py runs/single/train_20250720_123456/metrics.json --compare
+python src/visualize_learning.py runs/singles/train_20250720_123456/metrics.json --compare
 
 # Analyze hyperparameter search results
-python src/visualize_learning.py --search-results runs/search/random_20250720_123456/search_results.json
+python src/visualize_learning.py --search-results runs/searches/search_20250720_123456/search_results.json
 
 # Plot all runs from everywhere
 python src/visualize_learning.py "runs/**/metrics.json"
@@ -107,13 +107,13 @@ The best configuration achieved a score of **497.52**, demonstrating remarkably 
 ### Directory Structure
 ```
 runs/
-├── single/                  # Individual training runs
+├── singles/                 # Individual training runs
 │   └── train_YYYYMMDD_HHMMSS/
 │       ├── metrics.json     # Training metrics and returns
 │       ├── model.pt         # Final checkpoint
 │       └── model_best.pt    # Best checkpoint (highest avg return)
-└── search/                  # Hyperparameter search results
-    └── method_YYYYMMDD_HHMMSS/
+└── searches/                # Hyperparameter search results
+    └── search_YYYYMMDD_HHMMSS/
         ├── search_results.json   # Combined search results
         └── trial_name/
             └── metrics.json      # Individual trial metrics
