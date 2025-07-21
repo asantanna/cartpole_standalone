@@ -14,10 +14,16 @@ try:
 except ImportError:
     from .cartpole import get_run_directory, ensure_directory_exists
 
-def run_experiment(params, run_id, num_episodes=100, show_output=True, refinement_info=None, out_dir=None):
+def run_experiment(params, run_id, num_episodes=100, show_output=True, refinement_info=None, out_dir=None, num_envs=1):
     """Run a single experiment with given hyperparameters."""
+    # Choose which script to use based on num_envs
+    if num_envs > 1:
+        script = 'src/cartpole_vec.py'
+    else:
+        script = 'src/cartpole.py'
+    
     cmd = [
-        sys.executable, 'src/cartpole.py',
+        sys.executable, script,
         '--num-episodes', str(num_episodes),
         '--lr-actor', str(params['lr_actor']),
         '--lr-critic', str(params['lr_critic']),
@@ -28,8 +34,13 @@ def run_experiment(params, run_id, num_episodes=100, show_output=True, refinemen
         '--reward-scale', str(params['reward_scale']),
         '--td-clip', str(params['td_clip']),
         '--save-metrics',
+        '--save-checkpoint', f'{run_id}_checkpoint.pth',
         '--run-id', run_id
     ]
+    
+    # Add num-envs if using vectorized version
+    if num_envs > 1:
+        cmd.extend(['--num-envs', str(num_envs)])
     
     # Add output directory if specified
     if out_dir:
@@ -115,7 +126,7 @@ def run_experiment(params, run_id, num_episodes=100, show_output=True, refinemen
         print(f"✗ Error: {e}")
         return None, None, None
 
-def grid_search(param_grid, num_episodes=100, show_output=True, search_id=None):
+def grid_search(param_grid, num_episodes=100, show_output=True, search_id=None, num_envs=1):
     """Perform grid search over hyperparameter combinations."""
     # Create search directory
     if search_id is None:
@@ -142,7 +153,7 @@ def grid_search(param_grid, num_episodes=100, show_output=True, search_id=None):
         run_id = f"grid_{i}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         print(f"\n[{i+1}/{len(combinations)}] Starting experiment...")
-        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, out_dir=search_dir)
+        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, out_dir=search_dir, num_envs=num_envs)
         
         if score is not None:
             results.append({
@@ -178,7 +189,7 @@ def grid_search(param_grid, num_episodes=100, show_output=True, search_id=None):
     
     return results, best_params, best_score, search_dir
 
-def random_search(param_ranges, n_trials=50, num_episodes=100, show_output=True, search_id=None, refinement_info=None):
+def random_search(param_ranges, n_trials=50, num_episodes=100, show_output=True, search_id=None, refinement_info=None, num_envs=1):
     """Perform random search over hyperparameter ranges."""
     # Create search directory
     if search_id is None:
@@ -209,7 +220,7 @@ def random_search(param_ranges, n_trials=50, num_episodes=100, show_output=True,
         run_id = f"random_{i}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         
         print(f"\n[{i+1}/{n_trials}] Starting experiment...")
-        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, refinement_info, out_dir=search_dir)
+        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, refinement_info, out_dir=search_dir, num_envs=num_envs)
         
         if score is not None:
             results.append({
@@ -246,7 +257,7 @@ def random_search(param_ranges, n_trials=50, num_episodes=100, show_output=True,
     
     return results, best_params, best_score, search_dir
 
-def probe_nearby_search(top_runs, n_trials, num_episodes=100, show_output=True, noise_level=0.3, search_id=None, refine_dir=None):
+def probe_nearby_search(top_runs, n_trials, num_episodes=100, show_output=True, noise_level=0.3, search_id=None, refine_dir=None, num_envs=1):
     """
     Perform random search by probing near top performers.
     
@@ -292,7 +303,7 @@ def probe_nearby_search(top_runs, n_trials, num_episodes=100, show_output=True, 
         run_id = f"probe_{i}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         print(f"\n[{i+1}/{n_trials}] Starting experiment...")
         
-        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, refinement_info, out_dir=search_dir)
+        score, metrics, metrics_file = run_experiment(params, run_id, num_episodes, show_output, refinement_info, out_dir=search_dir, num_envs=num_envs)
         
         if score is not None:
             results.append({
@@ -384,28 +395,43 @@ def calculate_shrunken_ranges(results, top_percent=0.2, expand=0.2, original_ran
 
 def sample_near_top_performer(top_runs, noise_level=0.3):
     """Sample parameters near a randomly selected top performer."""
+    # Parameter bounds for clipping
+    param_bounds = {
+        'lr_actor': (1e-6, 1e-2),
+        'lr_critic': (1e-5, 1e-1),
+        'lambda_actor': (0.0, 1.0),
+        'lambda_critic': (0.0, 1.0),
+        'gamma': (0.0, 1.0),
+        'noise_std': (1e-3, 1.0),
+        'reward_scale': (0.1, 100.0),
+        'td_clip': (0.1, 20.0)
+    }
+    
     # Pick random top performer
     seed_run = random.choice(top_runs)
     
     # Add noise to each parameter
     new_params = {}
     for param, value in seed_run['params'].items():
-        if param in ['lr_actor', 'lr_critic', 'noise_std', 'reward_scale']:
+        if param in ['lr_actor', 'lr_critic', 'noise_std', 'reward_scale', 'td_clip']:
             # Multiplicative noise for log-scale parameters
-            noise_factor = np.random.uniform(1 - noise_level, 1 + noise_level)
-            new_value = value * noise_factor
-            # Ensure positive
-            new_params[param] = max(new_value, 1e-8)
+            # Use log-space to ensure we explore orders of magnitude evenly
+            log_value = np.log10(value)
+            log_noise = np.random.uniform(-noise_level, noise_level)
+            new_value = 10 ** (log_value + log_noise)
         else:
-            # Additive noise for linear-scale parameters  
-            noise = np.random.uniform(-noise_level, noise_level)
-            new_value = value * (1 + noise)
-            
-            # Clamp to reasonable ranges
-            if param in ['lambda_actor', 'lambda_critic', 'gamma']:
-                new_params[param] = np.clip(new_value, 0.0, 0.999)
-            else:
-                new_params[param] = new_value
+            # Additive noise for linear-scale parameters
+            # Scale noise by parameter range
+            param_range = param_bounds[param][1] - param_bounds[param][0]
+            noise = np.random.uniform(-noise_level, noise_level) * param_range * 0.3
+            new_value = value + noise
+        
+        # Apply bounds
+        if param in param_bounds:
+            min_val, max_val = param_bounds[param]
+            new_params[param] = np.clip(new_value, min_val, max_val)
+        else:
+            new_params[param] = new_value
     
     return new_params
 
@@ -434,6 +460,8 @@ def main():
                         help='Noise level for probe-nearby method (default: 0.3)')
     parser.add_argument('--refine-expand', type=float, default=0.2,
                         help='Expansion factor for shrink-hparam-space (default: 0.2)')
+    parser.add_argument('--num-envs', type=int, default=1,
+                        help='Number of parallel environments (default: 1, uses vectorized implementation if > 1)')
     args = parser.parse_args()
     
     show_output = not args.quiet
@@ -456,7 +484,7 @@ def main():
                 'td_clip': [5.0]  # Fixed
             }
         
-        results, best_params, best_score, search_dir = grid_search(param_grid, args.num_episodes, show_output)
+        results, best_params, best_score, search_dir = grid_search(param_grid, args.num_episodes, show_output, num_envs=args.num_envs)
         
     else:  # random search
         if args.refine:
@@ -496,7 +524,7 @@ def main():
                 
                 results, best_params, best_score, search_dir = random_search(
                     param_ranges, args.n_trials, args.num_episodes, show_output,
-                    refinement_info=refinement_info
+                    refinement_info=refinement_info, num_envs=args.num_envs
                 )
             else:  # probe-nearby
                 # Get top performers for probe-nearby method
@@ -509,14 +537,14 @@ def main():
                 results, best_params, best_score, search_dir = probe_nearby_search(
                     top_runs, args.n_trials, args.num_episodes, show_output,
                     noise_level=args.refine_noise,
-                    refine_dir=args.refine
+                    refine_dir=args.refine, num_envs=args.num_envs
                 )
         elif args.use_refined:
             from refined_search_config import get_search_config
             param_ranges = get_search_config('refined_random')
             print("Using refined random search configuration")
             results, best_params, best_score, search_dir = random_search(
-                param_ranges, args.n_trials, args.num_episodes, show_output
+                param_ranges, args.n_trials, args.num_episodes, show_output, num_envs=args.num_envs
             )
         else:
             # Define original parameter ranges for random search
@@ -531,7 +559,7 @@ def main():
                 'td_clip': (1.0, 10.0)
             }
             results, best_params, best_score, search_dir = random_search(
-                param_ranges, args.n_trials, args.num_episodes, show_output
+                param_ranges, args.n_trials, args.num_episodes, show_output, num_envs=args.num_envs
             )
     
     # Results are already saved in the search directory

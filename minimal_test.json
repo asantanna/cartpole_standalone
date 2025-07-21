@@ -1,0 +1,20 @@
+[
+    {
+        "name": "quick_test",
+        "episodes": 10,
+        "trials": 10,
+        "method": "random",
+        "refine_method": null,
+        "top_percent": 0.2,
+        "noise_level": 0.3
+    },
+    {
+        "name": "quick_refine",
+        "episodes": 10,
+        "trials": 10,
+        "method": "refine",
+        "refine_method": "probe-nearby",
+        "top_percent": 0.2,
+        "noise_level": 0.2
+    }
+]

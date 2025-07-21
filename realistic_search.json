@@ -1,0 +1,38 @@
+[
+    {
+        "name": "broad_exploration",
+        "episodes": 50,
+        "trials": 200,
+        "method": "random",
+        "refine_method": null,
+        "top_percent": 0.2,
+        "noise_level": 0.3
+    },
+    {
+        "name": "initial_refinement",
+        "episodes": 100,
+        "trials": 100,
+        "method": "refine",
+        "refine_method": "adaptive",
+        "top_percent": 0.2,
+        "noise_level": 0.25
+    },
+    {
+        "name": "fine_tuning",
+        "episodes": 200,
+        "trials": 50,
+        "method": "refine",
+        "refine_method": "probe-nearby",
+        "top_percent": 0.1,
+        "noise_level": 0.15
+    },
+    {
+        "name": "final_verification",
+        "episodes": 500,
+        "trials": 30,
+        "method": "refine",
+        "refine_method": "probe-nearby",
+        "top_percent": 0.05,
+        "noise_level": 0.05
+    }
+]
