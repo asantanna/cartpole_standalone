@@ -11,6 +11,8 @@ This repository contains an implementation of an eligibility trace-based actor-c
 - **Checkpoint save/load** with automatic training mode management
 - **Automatic best model saving** during training
 - **Organized runs directory** structure for experiments and searches
+- **Physics optimization** with PhysX TGS solver and optimized parameters
+- **Proper rendering** configuration to avoid double-rendering issues
 
 ## Quick Start
 
@@ -83,13 +85,14 @@ python src/visualize_learning.py "runs/**/metrics.json"
 ## Key Findings from Hyperparameter Search
 
 The search revealed that **very low learning rates** are crucial for stable performance:
-- Best actor learning rate: ~8e-5 (10-20x lower than typical)
-- Best critic learning rate: ~2.5e-4
-- Low exploration noise: 0.02-0.05
-- High discount factor: 0.96-0.97
-- Moderate reward scaling: 10-13
+- Best actor learning rate: ~1.5e-5 (extremely low)
+- Best critic learning rate: ~0.024 (much higher than actor)
+- Very low exploration noise: 0.05
+- High lambda values: 0.82 (actor), 0.96 (critic)
+- High discount factor: 0.96
+- Moderate reward scaling: 10.0
 
-The best configuration achieved a score of **497.52**, demonstrating remarkably stable performance.
+The best configuration achieved an average return of **67.4** over 500 episodes, with maximum returns reaching 500 (the environment limit).
 
 ## Files and Directory Structure
 
@@ -117,6 +120,13 @@ runs/
         ├── search_results.json   # Combined search results
         └── trial_name/
             └── metrics.json      # Individual trial metrics
+
+best_runs/                   # Best performing runs copied here
+└── searches/
+    └── search_YYYYMMDD_best/
+        └── trial_name/
+            ├── metrics.json
+            └── checkpoint_best.pth
 ```
 
 ## Custom Hyperparameters

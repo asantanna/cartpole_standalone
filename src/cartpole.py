@@ -51,9 +51,24 @@ def resolve_checkpoint_path(filepath):
 
 #─── Environment setup ─────────────────────────────────────────────────────────
 def make_env(headless=True, physics_fps=60):
-    # Create dnne_cfg to override physics dt
+    # Create dnne_cfg to override physics dt and add PhysX optimizations
     dnne_cfg = {
-        'physics_dt': 1.0 / physics_fps
+        'physics_dt': 1.0 / physics_fps,
+        'sim': {
+            'physx': {
+                'solver_type': 1,  # TGS solver - more stable and faster
+                'num_position_iterations': 4,
+                'num_velocity_iterations': 0,
+                'contact_offset': 0.02,
+                'rest_offset': 0.001,
+                'bounce_threshold_velocity': 0.2,
+                'max_depenetration_velocity': 100.0,
+                'default_buffer_size_multiplier': 2.0,
+                'max_gpu_contact_pairs': 1048576,
+                'num_subscenes': 4,  # Parallel processing even for 1 env
+                'contact_collection': 0
+            }
+        }
     }
     
     env = isaacgymenvs.make(
@@ -64,6 +79,7 @@ def make_env(headless=True, physics_fps=60):
         rl_device="cuda:0",
         graphics_device_id=0,
         headless=headless,        # control visualization
+        force_render=False,  # rl_games player handles rendering separately
         dnne_cfg=dnne_cfg
     )
     
@@ -225,7 +241,6 @@ def train(headless=True, num_episodes=500, args=None):
         timing_stats = {
             'policy': [],
             'step': [],
-            'render': [],
             'td_compute': [],
             'update': [],
             'reset': [],
@@ -310,19 +325,10 @@ def train(headless=True, num_episodes=500, args=None):
                 if debug_timing:
                     timing_stats['step'].append(time.time() - t0)
                 if not headless:
-                    if debug_timing:
-                        t0 = time.time()
-                    env.render()              # update viewer
+                    env.render()  # Need to call render explicitly since force_render=False
                     frame_count += 1
-                    
-                    # Control timing to respect user's target FPS
-                    now = time.time()
-                    elapsed = now - last_frame_time
-                    if elapsed < render_dt:
-                        time.sleep(render_dt - elapsed)
-                    last_frame_time = time.time()
-                    if debug_timing:
-                        timing_stats['render'].append(time.time() - t0)
+                    # Small sleep to let rendering catch up (like rl_games player)
+                    time.sleep(0.002)
                 total_r += reward[0].item() if torch.is_tensor(reward[0]) else reward[0]
                 
                 # compute TD error with scaled reward
@@ -435,7 +441,7 @@ def train(headless=True, num_episodes=500, args=None):
             # Print percentage breakdown
             total_loop_time = sum(timing_stats['total_loop'])
             print(f"\nPercentage breakdown of total loop time:")
-            for component in ['policy', 'step', 'render', 'td_compute', 'update']:
+            for component in ['policy', 'step', 'td_compute', 'update']:
                 if timing_stats[component]:
                     pct = (sum(timing_stats[component]) / total_loop_time) * 100
                     print(f"  {component:<12}: {pct:>5.1f}%")
