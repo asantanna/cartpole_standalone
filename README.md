@@ -164,3 +164,13 @@ The implementation uses:
 - **TD error clipping** for stability
 - **Xavier initialization** for network weights
 - **Reward scaling** to prevent value explosion
+
+### Note on Vectorized Environments
+
+This implementation is designed for single environments only. Eligibility traces are fundamentally incompatible with vectorized/parallel environments because:
+
+1. **Temporal coherence**: Eligibility traces maintain a decaying memory of state-action pairs over time, requiring a continuous experience stream
+2. **Asynchronous resets**: When environments reset at different times, traces from different episodes get mixed, breaking credit assignment
+3. **Batch update issues**: Accumulating updates across many parallel episodes creates gradient steps that are too large and destabilize learning
+
+For parallel training with multiple environments, consider using algorithms without eligibility traces (e.g., PPO, A2C). This implementation prioritizes biological plausibility and correct temporal credit assignment over parallel training speed.
