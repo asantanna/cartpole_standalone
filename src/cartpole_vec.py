@@ -51,9 +51,24 @@ def resolve_checkpoint_path(filepath):
 
 #─── Environment setup ─────────────────────────────────────────────────────────
 def make_env(headless=True, num_envs=1, physics_fps=60):
-    # Create dnne_cfg to override physics dt
+    # Create dnne_cfg to override physics dt and add PhysX optimizations
     dnne_cfg = {
-        'physics_dt': 1.0 / physics_fps
+        'physics_dt': 1.0 / physics_fps,
+        'sim': {
+            'physx': {
+                'solver_type': 1,  # TGS solver - more stable and faster
+                'num_position_iterations': 4,
+                'num_velocity_iterations': 0,
+                'contact_offset': 0.02,
+                'rest_offset': 0.001,
+                'bounce_threshold_velocity': 0.2,
+                'max_depenetration_velocity': 100.0,
+                'default_buffer_size_multiplier': 2.0,
+                'max_gpu_contact_pairs': 1048576,
+                'num_subscenes': 4,  # Parallel processing even for 1 env
+                'contact_collection': 0
+            }
+        }
     }
     
     env = isaacgymenvs.make(
@@ -64,6 +79,7 @@ def make_env(headless=True, num_envs=1, physics_fps=60):
         rl_device="cuda:0",
         graphics_device_id=0,
         headless=headless,        # control visualization
+        force_render=False,  # rl_games player handles rendering separately
         dnne_cfg=dnne_cfg
     )
     
@@ -228,8 +244,11 @@ def train(headless=True, num_episodes=500, num_envs=1, args=None):
         physics_fps = args.physics_fps
     
     print(f"Creating environment with {num_envs} parallel environments...")
+    import sys
+    sys.stdout.flush()
     env = make_env(headless=headless, num_envs=num_envs, physics_fps=physics_fps)
     print("Environment created!")
+    sys.stdout.flush()
     
     # Initialize timing variables for real-time rendering
     # Default render FPS to physics FPS unless explicitly specified
@@ -311,72 +330,75 @@ def train(headless=True, num_episodes=500, num_envs=1, args=None):
             # step all environments
             next_obs_dict, rewards, dones, _ = env.step(actions)
             next_obs = next_obs_dict['obs']
-        
-        if not headless:
-            env.render()              # update viewer
-            frame_count += 1
             
-            # Control timing to respect user's target FPS
-            now = time.time()
-            elapsed = now - last_frame_time
-            if elapsed < render_dt:
-                time.sleep(render_dt - elapsed)
-            last_frame_time = time.time()
-        
-        # Update episode returns and lengths
-        episode_returns += rewards.squeeze()
-        episode_lengths += 1
-        
-        # compute TD error with scaled reward for all environments
-        scaled_rewards = rewards.squeeze() / reward_scale
-        next_states = next_obs.clone().detach().to(device=ac.device, dtype=torch.float32)
-        v = ac.value(states)
-        v_p = ac.value(next_states) * (~dones).float()  # Mask out terminal states
-        delta = scaled_rewards + gamma * v_p - v
-        
-        # traces & updates (use mean for gradient)
-        ac.update_traces(states, means)
-        ac.apply_updates(delta, td_clip)
-        
-        # Handle episode terminations
-        done_indices = torch.where(dones)[0]
-        if len(done_indices) > 0:
-            for idx in done_indices:
-                # Record completed episode
-                return_value = episode_returns[idx].item()
-                all_returns.append(return_value)
-                episodes_completed += 1
+            if not headless:
+                env.render()              # update viewer
+                frame_count += 1
                 
-                # Print progress
-                if episodes_completed % 10 == 0 or episodes_completed <= 10:
-                    avg_return = np.mean(all_returns[-window_size:]) if len(all_returns) >= window_size else np.mean(all_returns)
-                    print(f"Episode {episodes_completed:3d}\tReturn {return_value:6.1f}\tAvg Return {avg_return:6.1f}")
-                
-                # Auto-save best model during training
-                if ac.training_mode and len(all_returns) >= window_size:
-                    avg_return = np.mean(all_returns[-window_size:])
-                    if avg_return > best_avg_return:
-                        best_avg_return = avg_return
-                        if args and args.save_checkpoint and run_dir:
-                            # Save with _best suffix in run directory
-                            checkpoint_name = os.path.basename(args.save_checkpoint)
-                            best_path = checkpoint_name.rsplit('.', 1)
-                            if len(best_path) == 2:
-                                best_checkpoint_name = f"{best_path[0]}_best.{best_path[1]}"
-                            else:
-                                best_checkpoint_name = f"{checkpoint_name}_best"
-                            best_checkpoint_path = os.path.join(run_dir, best_checkpoint_name)
-                            ac.save_checkpoint(best_checkpoint_path, physics_fps=physics_fps)
-                            print(f"New best average return: {best_avg_return:.2f}")
-                
-                # Reset this environment
-                episode_returns[idx] = 0
-                episode_lengths[idx] = 0
-                ac.reset_traces(env_ids=[idx])
-                
-                # Check if we've completed enough episodes
-                if episodes_completed >= num_episodes:
-                    break
+                # Control timing to respect user's target FPS
+                now = time.time()
+                elapsed = now - last_frame_time
+                if elapsed < render_dt:
+                    time.sleep(render_dt - elapsed)
+                last_frame_time = time.time()
+            
+            # Update episode returns and lengths
+            episode_returns += rewards.squeeze()
+            episode_lengths += 1
+            
+            # compute TD error with scaled reward for all environments
+            scaled_rewards = rewards.squeeze() / reward_scale
+            next_states = next_obs.clone().detach().to(device=ac.device, dtype=torch.float32)
+            v = ac.value(states)
+            v_p = ac.value(next_states) * (~dones).float()  # Mask out terminal states
+            delta = scaled_rewards + gamma * v_p - v
+            
+            # traces & updates (use mean for gradient)
+            ac.update_traces(states, means)
+            ac.apply_updates(delta, td_clip)
+            
+            # Update states
+            states = next_states
+            
+            # Handle episode terminations
+            done_indices = torch.where(dones)[0]
+            if len(done_indices) > 0:
+                for idx in done_indices:
+                    # Record completed episode
+                    return_value = episode_returns[idx].item()
+                    all_returns.append(return_value)
+                    episodes_completed += 1
+                    
+                    # Print progress
+                    if episodes_completed % 10 == 0 or episodes_completed <= 10:
+                        avg_return = np.mean(all_returns[-window_size:]) if len(all_returns) >= window_size else np.mean(all_returns)
+                        print(f"Episode {episodes_completed:3d}\tReturn {return_value:6.1f}\tAvg Return {avg_return:6.1f}")
+                    
+                    # Auto-save best model during training
+                    if ac.training_mode and len(all_returns) >= window_size:
+                        avg_return = np.mean(all_returns[-window_size:])
+                        if avg_return > best_avg_return:
+                            best_avg_return = avg_return
+                            if args and args.save_checkpoint and run_dir:
+                                # Save with _best suffix in run directory
+                                checkpoint_name = os.path.basename(args.save_checkpoint)
+                                best_path = checkpoint_name.rsplit('.', 1)
+                                if len(best_path) == 2:
+                                    best_checkpoint_name = f"{best_path[0]}_best.{best_path[1]}"
+                                else:
+                                    best_checkpoint_name = f"{checkpoint_name}_best"
+                                best_checkpoint_path = os.path.join(run_dir, best_checkpoint_name)
+                                ac.save_checkpoint(best_checkpoint_path, physics_fps=physics_fps)
+                                print(f"New best average return: {best_avg_return:.2f}")
+                    
+                    # Reset this environment
+                    episode_returns[idx] = 0
+                    episode_lengths[idx] = 0
+                    ac.reset_traces(env_ids=[idx])
+                    
+                    # Check if we've completed enough episodes
+                    if episodes_completed >= num_episodes:
+                        break
         
         # Update states
         states = next_states
