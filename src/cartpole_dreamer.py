@@ -1,4 +1,23 @@
 #!/usr/bin/env python3
+import warnings
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', message='.*Box bound precision lowered.*')
+warnings.filterwarnings('ignore', message='.*version_base parameter is not specified.*')
+warnings.filterwarnings('ignore', message='.*FBX.*')
+warnings.filterwarnings('ignore', message='.*torch.load.*')
+warnings.filterwarnings('ignore', message='.*weights_only.*')
+
+import os
+os.environ['CUDA_HOME'] = '/usr/local/cuda'  # Suppress CUDA warnings
+os.environ['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'  # Suppress CUDA device warnings
+
+# Suppress Isaac Gym logger
+import logging
+logging.getLogger().setLevel(logging.ERROR)
+
+
 import time
 import numpy as np
 import argparse
@@ -7,7 +26,6 @@ import isaacgymenvs
 import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
-import os
 import sys
 from datetime import datetime
 from collections import deque
@@ -92,7 +110,8 @@ class DreamingActorCritic:
     def __init__(self, obs_dim, act_dim,
                  lr_a=8e-5, lr_c=2.5e-4,
                  lambda_a=0.88, lambda_c=0.92,
-                 noise_std=0.05, device='cuda:0'):
+                 noise_std=0.05, device='cuda:0',
+                 dream_noise=0.1, refresh_after_sleep=True):
         self.device = torch.device(device)
         self.obs_dim = obs_dim
         self.act_dim = act_dim
@@ -127,14 +146,16 @@ class DreamingActorCritic:
         }
         
         # Dream parameters
-        self.dream_noise_sigma = 0.1  # Initial noise for parameter perturbation
+        self.dream_noise_sigma = dream_noise  # Initial noise for parameter perturbation
         self.dream_noise_decay = 0.995  # Decay rate for noise
-        self.min_dream_noise = 0.01
+        self.min_dream_noise = min(0.01, dream_noise)  # Don't decay below initial if starting low
+        self.refresh_after_sleep = refresh_after_sleep  # Whether to reset traces after dreams
         
         # Sleep pressure thresholds
         self.trace_saturation_threshold = 0.8
         self.td_variance_threshold = 0.01
         self.action_entropy_threshold = 0.1
+        self.dream_threshold = 0.8  # Overall threshold for triggering dreams
         
         # Theoretical max norm for eligibility traces
         self.theoretical_max_norm = np.sqrt(obs_dim * act_dim)
@@ -187,9 +208,34 @@ class DreamingActorCritic:
             self.td_error_history.append(delta.item())
     
     def compute_trace_saturation(self):
-        """Compute how saturated the eligibility traces are."""
+        """Compute how saturated the eligibility traces are (0-1 range)."""
+        # Use a rolling average of trace norms to detect stagnation
         current_norm = torch.norm(self.e_a).item()
-        return current_norm / self.theoretical_max_norm
+        
+        # Keep track of recent trace norms
+        if not hasattr(self, 'trace_norm_history'):
+            self.trace_norm_history = deque(maxlen=20)
+        
+        self.trace_norm_history.append(current_norm)
+        
+        if len(self.trace_norm_history) < 5:
+            return 0.0  # Not enough data
+        
+        # Compute saturation based on how stable the trace norm is
+        # If trace norm isn't changing much, we're saturated
+        recent_norms = list(self.trace_norm_history)
+        norm_variance = np.var(recent_norms[-10:])
+        norm_mean = np.mean(recent_norms[-10:])
+        
+        # Coefficient of variation (normalized variance)
+        if norm_mean > 0:
+            cv = np.sqrt(norm_variance) / norm_mean
+            # Low CV means high saturation (stable traces)
+            saturation = max(0.0, min(1.0, 1.0 - cv))
+        else:
+            saturation = 0.0
+        
+        return saturation
     
     def compute_td_variance(self):
         """Compute variance of recent TD errors."""
@@ -235,6 +281,9 @@ class DreamingActorCritic:
             'trace_saturation': trace_sat,
             'td_variance': td_var,
             'action_entropy': action_ent,
+            'pressure_trace': pressure_trace,
+            'pressure_td': pressure_td,
+            'pressure_action': pressure_action,
             'combined_pressure': sleep_pressure
         })
         
@@ -244,20 +293,26 @@ class DreamingActorCritic:
             'action_entropy': action_ent
         }
     
-    def should_dream(self, force_interval=None):
+    def should_dream(self, force_interval=None, dream_threshold=None):
         """Determine if dreaming should occur."""
         # For initial testing, can force dreams every N episodes
         if force_interval and self.dream_stats['episodes_since_last_dream'] >= force_interval:
             return True
         
         sleep_pressure, _ = self.compute_sleep_pressure()
-        return sleep_pressure > 0.8  # Dream when any pressure exceeds 80%
+        threshold = dream_threshold if dream_threshold is not None else self.dream_threshold
+        return sleep_pressure > threshold
     
     def create_dream_policy(self):
         """Create a single dream variation of the policy."""
+        # Scale noise by learning rate for adaptive exploration
+        # This ensures dream perturbations are proportional to typical update sizes
+        actor_noise_scale = self.dream_noise_sigma * np.sqrt(self.lr_a / 8e-5)  # Normalized to default LR
+        critic_noise_scale = self.dream_noise_sigma * np.sqrt(self.lr_c / 2.5e-4)
+        
         # Add Gaussian noise to parameters
-        W_a_dream = self.W_a + torch.randn_like(self.W_a) * self.dream_noise_sigma
-        W_c_dream = self.W_c + torch.randn_like(self.W_c) * self.dream_noise_sigma
+        W_a_dream = self.W_a + torch.randn_like(self.W_a) * actor_noise_scale
+        W_c_dream = self.W_c + torch.randn_like(self.W_c) * critic_noise_scale
         return W_a_dream, W_c_dream
     
     def evaluate_dream_policy(self, env, W_a_dream, W_c_dream, max_steps=200, gamma=0.96):
@@ -301,6 +356,12 @@ class DreamingActorCritic:
         # Run sequential dreams
         for i in range(num_dreams):
             W_a_dream, W_c_dream = self.create_dream_policy()
+            
+            # Debug: Check if dream weights are identical to base weights
+            if self.dream_noise_sigma == 0:
+                assert torch.allclose(W_a_dream, self.W_a), "Zero noise should give identical actor weights!"
+                assert torch.allclose(W_c_dream, self.W_c), "Zero noise should give identical critic weights!"
+            
             reward, steps = self.evaluate_dream_policy(env, W_a_dream, W_c_dream, gamma=gamma)
             dream_results.append({
                 'W_a_diff': W_a_dream - self.W_a,
@@ -315,14 +376,18 @@ class DreamingActorCritic:
                 print(f"  Dreams {i-3}-{i}: rewards {[f'{r:.1f}' for r in recent_rewards]}")
         
         # Find successful dreams (better than baseline)
-        successful_dreams = [d for d in dream_results if d['improvement'] > 0]
+        # Add small threshold to avoid numerical precision issues
+        improvement_threshold = 0.01 if self.dream_noise_sigma == 0 else 0
+        successful_dreams = [d for d in dream_results if d['improvement'] > improvement_threshold]
         num_successful = len(successful_dreams)
         
         print(f"  Dream results: {num_successful}/{num_dreams} improved over baseline")
         
         # Consolidate successful dreams
-        if num_successful > 0:
+        if num_successful > 0 and self.dream_noise_sigma > 0:
             self.consolidate_dreams_sequential(successful_dreams)
+        elif self.dream_noise_sigma == 0:
+            print("  Skipping consolidation (zero noise - no real parameter variations)")
         
         # Update dream statistics
         self.dream_stats['total_dreams'] += 1
@@ -332,6 +397,23 @@ class DreamingActorCritic:
         # Decay dream noise
         self.dream_noise_sigma = max(self.min_dream_noise, 
                                      self.dream_noise_sigma * self.dream_noise_decay)
+        
+        # Reset all components after dreaming (like waking up refreshed)
+        if self.refresh_after_sleep:
+            print("  Resetting mental state after dream consolidation")
+            
+            # Reset eligibility traces (mental fatigue)
+            self.reset_traces()
+            if hasattr(self, 'trace_norm_history'):
+                self.trace_norm_history.clear()
+            
+            # Reset TD error history (frustration)
+            self.td_error_history.clear()
+            
+            # Reset action history (boredom)
+            self.action_history.clear()
+        else:
+            print("  Keeping mental state intact (refresh disabled)")
         
         return [d['reward'] for d in dream_results]
     
@@ -362,9 +444,13 @@ class DreamingActorCritic:
             W_c_update += weights[i] * dream['W_c_diff']
         
         # Apply updates with learning rate
-        consolidation_rate = 0.1  # How much to move toward successful dreams
-        self.W_a += consolidation_rate * W_a_update
-        self.W_c += consolidation_rate * W_c_update
+        # Scale consolidation by learning rate to avoid overshooting
+        # For best hyperparams (lr_a=1.5e-5), this gives consolidation_rate ≈ 0.0019
+        consolidation_rate_actor = 10 * self.lr_a  # Proportional to learning rate
+        consolidation_rate_critic = 10 * self.lr_c
+        
+        self.W_a += consolidation_rate_actor * W_a_update
+        self.W_c += consolidation_rate_critic * W_c_update
         
         avg_improvement = np.mean([d['improvement'] for d in top_dreams])
         print(f"  Consolidated top-{top_k} dreams (avg improvement: {avg_improvement:.1f})")
@@ -390,12 +476,40 @@ class DreamingActorCritic:
         torch.save(checkpoint, filepath)
         print(f"Checkpoint saved to {filepath}")
     
-    def load_checkpoint(self, filepath):
-        """Load model weights from a checkpoint file."""
-        checkpoint = torch.load(filepath, map_location=self.device)
+    def load_checkpoint(self, checkpoint_path):
+        """Load model weights and hyperparameters from checkpoint directory or file."""
+        import os
+        import json
+        
+        # If path is a directory, look for checkpoint file
+        if os.path.isdir(checkpoint_path):
+            # Look for checkpoint files in the directory
+            import glob
+            checkpoint_files = glob.glob(os.path.join(checkpoint_path, "*checkpoint*.pth"))
+            if not checkpoint_files:
+                raise FileNotFoundError(f"No checkpoint files found in {checkpoint_path}")
+            # Use the best checkpoint if available, otherwise the first one
+            checkpoint_file = next((f for f in checkpoint_files if "best" in f), checkpoint_files[0])
+            
+            # Look for metrics.json to get hyperparameters
+            metrics_file = os.path.join(checkpoint_path, "metrics.json")
+            if os.path.exists(metrics_file):
+                with open(metrics_file, 'r') as f:
+                    metrics_data = json.load(f)
+                    saved_hyperparams = metrics_data.get('hyperparameters', {})
+            else:
+                saved_hyperparams = {}
+        else:
+            # Path is a file
+            checkpoint_file = checkpoint_path
+            saved_hyperparams = {}
+        
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_file, map_location=self.device)
         self.W_a = checkpoint['W_a'].to(self.device)
         self.W_c = checkpoint['W_c'].to(self.device)
         self.log_std = checkpoint['log_std'].to(self.device)
+        
         # Reset traces when loading
         self.e_a = torch.zeros_like(self.W_a)
         self.e_c = torch.zeros_like(self.W_c)
@@ -408,46 +522,89 @@ class DreamingActorCritic:
         if 'dream_noise_sigma' in checkpoint:
             self.dream_noise_sigma = checkpoint['dream_noise_sigma']
         
-        # Get physics_fps if available (default to 60 for backward compatibility)
+        # Get hyperparameters from checkpoint or metrics file
+        checkpoint_hyperparams = checkpoint.get('hyperparams', {})
+        # Prefer hyperparams from metrics.json if available
+        hyperparams = saved_hyperparams if saved_hyperparams else checkpoint_hyperparams
+        
+        # Update learning rates and other hyperparameters
+        if 'lr_actor' in hyperparams:
+            self.lr_a = hyperparams['lr_actor']
+        elif 'lr_a' in hyperparams:
+            self.lr_a = hyperparams['lr_a']
+            
+        if 'lr_critic' in hyperparams:
+            self.lr_c = hyperparams['lr_critic']
+        elif 'lr_c' in hyperparams:
+            self.lr_c = hyperparams['lr_c']
+            
+        if 'lambda_actor' in hyperparams:
+            self.lambda_a = hyperparams['lambda_actor']
+        elif 'lambda_a' in hyperparams:
+            self.lambda_a = hyperparams['lambda_a']
+            
+        if 'lambda_critic' in hyperparams:
+            self.lambda_c = hyperparams['lambda_critic']
+        elif 'lambda_c' in hyperparams:
+            self.lambda_c = hyperparams['lambda_c']
+        
+        # Get physics_fps if available
         physics_fps = checkpoint.get('physics_fps', 60)
         
-        print(f"Checkpoint loaded from {filepath}")
-        print(f"Loaded checkpoint with params: {checkpoint['hyperparams']}")
+        print(f"Checkpoint loaded from {checkpoint_file}")
+        print(f"Loaded hyperparameters: lr_a={self.lr_a}, lr_c={self.lr_c}, lambda_a={self.lambda_a}, lambda_c={self.lambda_c}")
         if physics_fps != 60:
             print(f"Physics FPS: {physics_fps}")
         
-        return checkpoint['hyperparams'], physics_fps
+        return hyperparams, physics_fps
 
 #─── Training loop ─────────────────────────────────────────────────────────────
 def train(headless=True, num_episodes=500, args=None):
     # Set up run directory
     run_dir = None
     if args and (args.save_checkpoint or args.save_metrics):
-        run_dir = get_run_directory(run_type='singles', run_id=args.run_id if args.run_id != 'default' else None)
+        # If save_checkpoint is a string path, use that as the directory
+        if args.save_checkpoint and isinstance(args.save_checkpoint, str):
+            run_dir = args.save_checkpoint
+        else:
+            run_dir = get_run_directory(run_type='singles', run_id=args.run_id if args.run_id != 'default' else None)
         ensure_directory_exists(run_dir)
         print(f"Run directory: {run_dir}")
     
-    # Determine physics FPS
+    # Determine physics FPS (will be updated if loading checkpoint)
     physics_fps = 60  # default
     
-    if args and args.load_checkpoint:
-        # If loading a checkpoint, we need to check its physics FPS first
-        checkpoint_path = resolve_checkpoint_path(args.load_checkpoint)
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        physics_fps = checkpoint.get('physics_fps', 60)
-        
-        # Error if user tries to override with --physics-fps
-        if hasattr(args, 'physics_fps') and args.physics_fps != 60 and args.physics_fps != physics_fps:
-            print(f"ERROR: Cannot specify --physics-fps when loading a checkpoint.")
-            print(f"Checkpoint was trained with physics FPS {physics_fps}.")
-            sys.exit(1)
-    elif args and hasattr(args, 'physics_fps'):
+    if args and hasattr(args, 'physics_fps') and not args.load_checkpoint:
         # Only use command line physics_fps if NOT loading a checkpoint
         physics_fps = args.physics_fps
     
-    print("Creating environment...")
-    env = make_env(headless=headless, physics_fps=physics_fps)
-    print("Environment created!")
+    # Suppress Isaac Gym startup messages
+    import io
+    import contextlib
+    
+    if headless:
+        print("Creating environment...")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            env = make_env(headless=headless, physics_fps=physics_fps)
+        print("Environment created!")
+    else:
+        # In visual mode, show some output but suppress the worst warnings
+        import sys
+        old_stderr = sys.stderr
+        sys.stderr = io.StringIO()
+        
+        print("Creating environment...")
+        env = make_env(headless=headless, physics_fps=physics_fps)
+        print("Environment created!")
+        
+        # Restore stderr but filter out the captured warnings
+        captured_warnings = sys.stderr.getvalue()
+        sys.stderr = old_stderr
+        
+        # Only print non-Isaac Gym warnings
+        for line in captured_warnings.split('\n'):
+            if line and not any(skip in line for skip in ['ninja:', 'WARNING: dzn', '[Warning]', 'Not connected']):
+                print(line, file=sys.stderr)
     
     # Initialize timing variables for real-time rendering
     # Default render FPS to physics FPS unless explicitly specified
@@ -472,24 +629,38 @@ def train(headless=True, num_episodes=500, args=None):
     if args:
         # Check if we're loading a checkpoint
         if args.load_checkpoint:
-            # Create AC with defaults first
-            ac = DreamingActorCritic(obs_dim=obs_dim, act_dim=act_dim, device=device)
+            # Create AC with defaults first, but use command line dream_noise
+            refresh_after_sleep = (args.refresh_after_sleep == 'true')
+            ac = DreamingActorCritic(obs_dim=obs_dim, act_dim=act_dim, device=device,
+                                   dream_noise=args.dream_noise,
+                                   refresh_after_sleep=refresh_after_sleep)
             # Resolve checkpoint path
             checkpoint_path = resolve_checkpoint_path(args.load_checkpoint)
             if checkpoint_path != args.load_checkpoint:
                 print(f"Resolved checkpoint path: {checkpoint_path}")
-            # Load checkpoint
+            # Load checkpoint (hyperparameters are now updated inside load_checkpoint)
             loaded_params, loaded_physics_fps = ac.load_checkpoint(checkpoint_path)
+            
+            # Check physics FPS compatibility
+            if loaded_physics_fps != physics_fps:
+                print(f"WARNING: Environment physics FPS ({physics_fps}) doesn't match checkpoint ({loaded_physics_fps})")
+                if hasattr(args, 'physics_fps') and args.physics_fps != 60:
+                    print(f"ERROR: Cannot specify --physics-fps when loading a checkpoint.")
+                    print(f"Checkpoint was trained with physics FPS {loaded_physics_fps}.")
+                    sys.exit(1)
             
             # Use loaded hyperparams unless overridden
             gamma = args.gamma
             reward_scale = args.reward_scale
             td_clip = args.td_clip
         else:
+            refresh_after_sleep = (args.refresh_after_sleep == 'true')
             ac = DreamingActorCritic(obs_dim=obs_dim, act_dim=act_dim, device=device,
                             lr_a=args.lr_actor, lr_c=args.lr_critic,
                             lambda_a=args.lambda_actor, lambda_c=args.lambda_critic,
-                            noise_std=args.noise_std)
+                            noise_std=args.noise_std,
+                            dream_noise=args.dream_noise,
+                            refresh_after_sleep=refresh_after_sleep)
             gamma = args.gamma
             reward_scale = args.reward_scale
             td_clip = args.td_clip
@@ -504,6 +675,9 @@ def train(headless=True, num_episodes=500, args=None):
             force_dream_interval = args.force_dream_interval
         else:
             force_dream_interval = None
+        
+        # Set dream threshold
+        dream_threshold = args.dream_threshold if hasattr(args, 'dream_threshold') else 0.8
             
     else:
         ac = DreamingActorCritic(obs_dim=obs_dim, act_dim=act_dim, device=device)
@@ -511,13 +685,16 @@ def train(headless=True, num_episodes=500, args=None):
         reward_scale = 5.0
         td_clip = 5.0
         force_dream_interval = None
+        dream_threshold = 0.8
     
     mode_str = "training" if ac.training_mode else "evaluation"
     print(f"Starting {mode_str} for {num_episodes} episodes...")
-    if force_dream_interval:
+    if args and args.disable_dreams:
+        print("Dreams are DISABLED")
+    elif force_dream_interval:
         print(f"Forcing dreams every {force_dream_interval} episodes")
     else:
-        print("Dreams will be triggered by sleep pressure")
+        print(f"Dreams will be triggered by sleep pressure (threshold: {dream_threshold})")
     
     # Track running average
     returns = []
@@ -572,7 +749,7 @@ def train(headless=True, num_episodes=500, args=None):
             ac.dream_stats['episodes_since_last_dream'] += 1
             
             # Check if we should dream
-            if ac.training_mode and ac.should_dream(force_dream_interval):
+            if ac.training_mode and not args.disable_dreams and ac.should_dream(force_dream_interval, dream_threshold):
                 # Store performance before dreaming
                 pre_dream_avg = avg_return
                 
@@ -601,8 +778,8 @@ def train(headless=True, num_episodes=500, args=None):
                 # Print sleep pressure if in training mode
                 if ac.training_mode:
                     pressure, metrics = ac.compute_sleep_pressure()
-                    print(f"  Sleep pressure: {pressure:.2f} (trace: {metrics['trace_saturation']:.2f}, "
-                          f"td_var: {metrics['td_variance']:.3f}, action_ent: {metrics['action_entropy']:.2f})")
+                    print(f"  Sleep pressure: {pressure:.2f} (mental fatigue: {metrics['trace_saturation']:.2f}, "
+                          f"frustration: {metrics['td_variance']:.3f}, boredom: {metrics['action_entropy']:.2f})")
             
             # Auto-save best model during training
             if ac.training_mode and len(returns) >= window_size:
@@ -610,19 +787,13 @@ def train(headless=True, num_episodes=500, args=None):
                     best_avg_return = avg_return
                     if args and args.save_checkpoint and run_dir:
                         # Save with _best suffix in run directory
-                        checkpoint_name = os.path.basename(args.save_checkpoint)
-                        best_path = checkpoint_name.rsplit('.', 1)
-                        if len(best_path) == 2:
-                            best_checkpoint_name = f"{best_path[0]}_best.{best_path[1]}"
-                        else:
-                            best_checkpoint_name = f"{checkpoint_name}_best"
-                        best_checkpoint_path = os.path.join(run_dir, best_checkpoint_name)
+                        best_checkpoint_path = os.path.join(run_dir, "checkpoint_best.pth")
                         ac.save_checkpoint(best_checkpoint_path, physics_fps=physics_fps)
                         print(f"New best average return: {best_avg_return:.2f}")
         
         # Save checkpoint if requested
         if args and args.save_checkpoint and run_dir:
-            checkpoint_path = os.path.join(run_dir, os.path.basename(args.save_checkpoint))
+            checkpoint_path = os.path.join(run_dir, "checkpoint.pth")
             ac.save_checkpoint(checkpoint_path, physics_fps=physics_fps)
         
         # Save metrics if requested
@@ -706,8 +877,8 @@ if __name__ == "__main__":
     parser.add_argument('--best-config', action='store_true',
                         help='Use the best hyperparameters from search')
     # Checkpoint arguments
-    parser.add_argument('--save-checkpoint', type=str, default=None,
-                        help='Path to save checkpoint after training')
+    parser.add_argument('--save-checkpoint', nargs='?', const=True, default=None,
+                        help='Save checkpoint after training. Optional: specify directory path (default: auto-generated in runs/singles/)')
     parser.add_argument('--load-checkpoint', type=str, default=None,
                         help='Path to load checkpoint from')
     parser.add_argument('--training-mode', type=str, choices=['true', 'false'], default=None,
@@ -719,6 +890,14 @@ if __name__ == "__main__":
     # Dream-specific arguments
     parser.add_argument('--force-dream-interval', type=int, default=None,
                         help='Force dreams every N episodes (default: adaptive based on sleep pressure)')
+    parser.add_argument('--dream-threshold', type=float, default=0.8,
+                        help='Sleep pressure threshold for triggering dreams (default: 0.8)')
+    parser.add_argument('--dream-noise', type=float, default=0.1,
+                        help='Noise magnitude for dream parameter variations (default: 0.1)')
+    parser.add_argument('--refresh-after-sleep', type=str, choices=['true', 'false'], default='true',
+                        help='Reset traces/history after dreams (default: true)')
+    parser.add_argument('--disable-dreams', action='store_true',
+                        help='Disable dreaming entirely for testing')
     args = parser.parse_args()
     
     # Override with best config if requested

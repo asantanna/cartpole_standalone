@@ -162,27 +162,81 @@ class ActorCritic:
         torch.save(checkpoint, filepath)
         print(f"Checkpoint saved to {filepath}")
     
-    def load_checkpoint(self, filepath):
-        """Load model weights from a checkpoint file."""
-        checkpoint = torch.load(filepath, map_location=self.device)
+    def load_checkpoint(self, checkpoint_path):
+        """Load model weights and hyperparameters from checkpoint directory or file."""
+        import os
+        import json
+        
+        # If path is a directory, look for checkpoint file
+        if os.path.isdir(checkpoint_path):
+            # Look for checkpoint files in the directory
+            import glob
+            checkpoint_files = glob.glob(os.path.join(checkpoint_path, "*checkpoint*.pth"))
+            if not checkpoint_files:
+                raise FileNotFoundError(f"No checkpoint files found in {checkpoint_path}")
+            # Use the best checkpoint if available, otherwise the first one
+            checkpoint_file = next((f for f in checkpoint_files if "best" in f), checkpoint_files[0])
+            
+            # Look for metrics.json to get hyperparameters
+            metrics_file = os.path.join(checkpoint_path, "metrics.json")
+            if os.path.exists(metrics_file):
+                with open(metrics_file, 'r') as f:
+                    metrics_data = json.load(f)
+                    saved_hyperparams = metrics_data.get('hyperparameters', {})
+            else:
+                saved_hyperparams = {}
+        else:
+            # Path is a file
+            checkpoint_file = checkpoint_path
+            saved_hyperparams = {}
+        
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_file, map_location=self.device)
         self.W_a = checkpoint['W_a'].to(self.device)
         self.W_c = checkpoint['W_c'].to(self.device)
         self.log_std = checkpoint['log_std'].to(self.device)
+        
         # Reset traces when loading
         self.e_a = torch.zeros_like(self.W_a)
         self.e_c = torch.zeros_like(self.W_c)
         # Set training mode to False by default when loading
         self.training_mode = False
         
-        # Get physics_fps if available (default to 60 for backward compatibility)
+        # Get hyperparameters from checkpoint or metrics file
+        checkpoint_hyperparams = checkpoint.get('hyperparams', {})
+        # Prefer hyperparams from metrics.json if available
+        hyperparams = saved_hyperparams if saved_hyperparams else checkpoint_hyperparams
+        
+        # Update learning rates and other hyperparameters
+        if 'lr_actor' in hyperparams:
+            self.lr_a = hyperparams['lr_actor']
+        elif 'lr_a' in hyperparams:
+            self.lr_a = hyperparams['lr_a']
+            
+        if 'lr_critic' in hyperparams:
+            self.lr_c = hyperparams['lr_critic']
+        elif 'lr_c' in hyperparams:
+            self.lr_c = hyperparams['lr_c']
+            
+        if 'lambda_actor' in hyperparams:
+            self.lambda_a = hyperparams['lambda_actor']
+        elif 'lambda_a' in hyperparams:
+            self.lambda_a = hyperparams['lambda_a']
+            
+        if 'lambda_critic' in hyperparams:
+            self.lambda_c = hyperparams['lambda_critic']
+        elif 'lambda_c' in hyperparams:
+            self.lambda_c = hyperparams['lambda_c']
+        
+        # Get physics_fps if available
         physics_fps = checkpoint.get('physics_fps', 60)
         
-        print(f"Checkpoint loaded from {filepath}")
-        print(f"Loaded checkpoint with params: {checkpoint['hyperparams']}")
+        print(f"Checkpoint loaded from {checkpoint_file}")
+        print(f"Loaded hyperparameters: lr_a={self.lr_a}, lr_c={self.lr_c}, lambda_a={self.lambda_a}, lambda_c={self.lambda_c}")
         if physics_fps != 60:
             print(f"Physics FPS: {physics_fps}")
         
-        return checkpoint['hyperparams'], physics_fps
+        return hyperparams, physics_fps
 
 #─── Training loop ─────────────────────────────────────────────────────────────
 def train(headless=True, num_episodes=500, args=None):
@@ -202,21 +256,10 @@ def train(headless=True, num_episodes=500, args=None):
         ensure_directory_exists(run_dir)
         print(f"Run directory: {run_dir}")
     
-    # Determine physics FPS
+    # Determine physics FPS (will be updated if loading checkpoint)
     physics_fps = 60  # default
     
-    if args and args.load_checkpoint:
-        # If loading a checkpoint, we need to check its physics FPS first
-        checkpoint_path = resolve_checkpoint_path(args.load_checkpoint)
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        physics_fps = checkpoint.get('physics_fps', 60)
-        
-        # Error if user tries to override with --physics-fps
-        if hasattr(args, 'physics_fps') and args.physics_fps != 60 and args.physics_fps != physics_fps:
-            print(f"ERROR: Cannot specify --physics-fps when loading a checkpoint.")
-            print(f"Checkpoint was trained with physics FPS {physics_fps}.")
-            sys.exit(1)
-    elif args and hasattr(args, 'physics_fps'):
+    if args and hasattr(args, 'physics_fps') and not args.load_checkpoint:
         # Only use command line physics_fps if NOT loading a checkpoint
         physics_fps = args.physics_fps
     
@@ -265,8 +308,16 @@ def train(headless=True, num_episodes=500, args=None):
             checkpoint_path = resolve_checkpoint_path(args.load_checkpoint)
             if checkpoint_path != args.load_checkpoint:
                 print(f"Resolved checkpoint path: {checkpoint_path}")
-            # Load checkpoint
+            # Load checkpoint (hyperparameters are now updated inside load_checkpoint)
             loaded_params, loaded_physics_fps = ac.load_checkpoint(checkpoint_path)
+            
+            # Check physics FPS compatibility
+            if loaded_physics_fps != physics_fps:
+                print(f"WARNING: Environment physics FPS ({physics_fps}) doesn't match checkpoint ({loaded_physics_fps})")
+                if hasattr(args, 'physics_fps') and args.physics_fps != 60:
+                    print(f"ERROR: Cannot specify --physics-fps when loading a checkpoint.")
+                    print(f"Checkpoint was trained with physics FPS {loaded_physics_fps}.")
+                    sys.exit(1)
             
             # Use loaded hyperparams unless overridden
             gamma = args.gamma
@@ -376,19 +427,13 @@ def train(headless=True, num_episodes=500, args=None):
                     best_avg_return = avg_return
                     if args and args.save_checkpoint and run_dir:
                         # Save with _best suffix in run directory
-                        checkpoint_name = os.path.basename(args.save_checkpoint)
-                        best_path = checkpoint_name.rsplit('.', 1)
-                        if len(best_path) == 2:
-                            best_checkpoint_name = f"{best_path[0]}_best.{best_path[1]}"
-                        else:
-                            best_checkpoint_name = f"{checkpoint_name}_best"
-                        best_checkpoint_path = os.path.join(run_dir, best_checkpoint_name)
+                        best_checkpoint_path = os.path.join(run_dir, "checkpoint_best.pth")
                         ac.save_checkpoint(best_checkpoint_path, physics_fps=physics_fps)
                         print(f"New best average return: {best_avg_return:.2f}")
         
         # Save checkpoint if requested
         if args and args.save_checkpoint and run_dir:
-            checkpoint_path = os.path.join(run_dir, os.path.basename(args.save_checkpoint))
+            checkpoint_path = os.path.join(run_dir, "checkpoint.pth")
             ac.save_checkpoint(checkpoint_path, physics_fps=physics_fps)
         
         # Save metrics if requested
@@ -484,8 +529,8 @@ if __name__ == "__main__":
     parser.add_argument('--best-config', action='store_true',
                         help='Use the best hyperparameters from search')
     # Checkpoint arguments
-    parser.add_argument('--save-checkpoint', type=str, default=None,
-                        help='Path to save checkpoint after training')
+    parser.add_argument('--save-checkpoint', action='store_true',
+                        help='Save checkpoint after training to run directory')
     parser.add_argument('--load-checkpoint', type=str, default=None,
                         help='Path to load checkpoint from')
     parser.add_argument('--training-mode', type=str, choices=['true', 'false'], default=None,

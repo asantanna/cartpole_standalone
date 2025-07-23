@@ -34,7 +34,7 @@ def run_experiment(params, run_id, num_episodes=100, show_output=True, refinemen
         '--reward-scale', str(params['reward_scale']),
         '--td-clip', str(params['td_clip']),
         '--save-metrics',
-        '--save-checkpoint', f'{run_id}_checkpoint.pth',
+        '--save-checkpoint',
         '--run-id', run_id
     ]
     
