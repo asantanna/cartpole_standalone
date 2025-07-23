@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 import os
 import sys
+import json
 from datetime import datetime
 
 #─── Directory helpers ─────────────────────────────────────────────────────────
@@ -242,7 +243,7 @@ class ActorCritic:
 def train(headless=True, num_episodes=500, args=None):
     # Set up run directory
     run_dir = None
-    if args and (args.save_checkpoint or args.save_metrics):
+    if args and args.save_checkpoint:
         if hasattr(args, 'out_dir') and args.out_dir:
             # Use custom output directory
             run_id = args.run_id if args.run_id != 'default' else None
@@ -430,15 +431,17 @@ def train(headless=True, num_episodes=500, args=None):
                         best_checkpoint_path = os.path.join(run_dir, "checkpoint_best.pth")
                         ac.save_checkpoint(best_checkpoint_path, physics_fps=physics_fps)
                         print(f"New best average return: {best_avg_return:.2f}")
-        
-        # Save checkpoint if requested
+    
+    except KeyboardInterrupt:
+        print("\n\nTraining interrupted by user. Saving progress...")
+    
+    finally:
+        # Save checkpoint and metrics if requested
         if args and args.save_checkpoint and run_dir:
             checkpoint_path = os.path.join(run_dir, "checkpoint.pth")
             ac.save_checkpoint(checkpoint_path, physics_fps=physics_fps)
-        
-        # Save metrics if requested
-        if args and args.save_metrics and run_dir:
-            import json
+            
+            # Always save metrics with checkpoint
             metrics = {
                 'run_id': args.run_id,
                 'hyperparameters': {
@@ -458,8 +461,7 @@ def train(headless=True, num_episodes=500, args=None):
             with open(filename, 'w') as f:
                 json.dump(metrics, f, indent=2)
             print(f"Metrics saved to {filename}")
-    
-    finally:
+        
         # Print FPS statistics
         if not headless and frame_count > 0:
             total_time = time.time() - fps_start_time
@@ -520,10 +522,8 @@ if __name__ == "__main__":
     parser.add_argument('--td-clip', type=float, default=5.0,
                         help='TD error clipping value (default: 5.0)')
     # Output
-    parser.add_argument('--save-metrics', action='store_true',
-                        help='Save training metrics to file')
     parser.add_argument('--run-id', type=str, default='default',
-                        help='Run identifier for saving metrics')
+                        help='Run identifier for output directory')
     parser.add_argument('--out-dir', type=str, default=None,
                         help='Output directory for saving results (default: runs/singles)')
     parser.add_argument('--best-config', action='store_true',

@@ -27,9 +27,9 @@ import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical
 import sys
+import json
 from datetime import datetime
 from collections import deque
-import json
 
 #─── Directory helpers ─────────────────────────────────────────────────────────
 def get_run_directory(run_type='singles', run_id=None):
@@ -209,49 +209,67 @@ class DreamingActorCritic:
     
     def compute_trace_saturation(self):
         """Compute how saturated the eligibility traces are (0-1 range)."""
-        # Use a rolling average of trace norms to detect stagnation
-        current_norm = torch.norm(self.e_a).item()
+        # Compute current trace norm (both actor and critic)
+        current_norm = torch.norm(self.e_a).item() + torch.norm(self.e_c).item()
         
-        # Keep track of recent trace norms
+        # Keep track of recent trace norms and historical maximum
         if not hasattr(self, 'trace_norm_history'):
-            self.trace_norm_history = deque(maxlen=20)
+            self.trace_norm_history = deque(maxlen=50)
+            self.max_trace_norm = 0.0
         
         self.trace_norm_history.append(current_norm)
+        self.max_trace_norm = max(self.max_trace_norm, current_norm)
         
         if len(self.trace_norm_history) < 5:
             return 0.0  # Not enough data
         
-        # Compute saturation based on how stable the trace norm is
-        # If trace norm isn't changing much, we're saturated
-        recent_norms = list(self.trace_norm_history)
-        norm_variance = np.var(recent_norms[-10:])
-        norm_mean = np.mean(recent_norms[-10:])
+        # Saturation occurs when:
+        # 1. Current norm is close to historical maximum (traces near their peak)
+        # 2. Recent growth rate is low (traces have stopped growing)
         
-        # Coefficient of variation (normalized variance)
-        if norm_mean > 0:
-            cv = np.sqrt(norm_variance) / norm_mean
-            # Low CV means high saturation (stable traces)
-            saturation = max(0.0, min(1.0, 1.0 - cv))
+        recent_norms = list(self.trace_norm_history)[-10:]
+        
+        # Measure proximity to maximum
+        if self.max_trace_norm > 0:
+            proximity_to_max = current_norm / self.max_trace_norm
         else:
-            saturation = 0.0
+            proximity_to_max = 0.0
+        
+        # Measure growth rate (how much traces are still growing)
+        if len(recent_norms) >= 2:
+            growth_rate = (recent_norms[-1] - recent_norms[0]) / (len(recent_norms) - 1)
+            # Normalize by current value to get relative growth
+            if current_norm > 0:
+                relative_growth = abs(growth_rate) / current_norm
+                # Low growth = high saturation
+                growth_saturation = 1.0 - min(1.0, relative_growth * 10)
+            else:
+                growth_saturation = 0.0
+        else:
+            growth_saturation = 0.0
+        
+        # Combine both indicators
+        saturation = 0.6 * proximity_to_max + 0.4 * growth_saturation
         
         return saturation
     
     def compute_td_variance(self):
         """Compute variance of recent TD errors."""
-        if len(self.td_error_history) < 10:
-            return float('inf')  # Not enough data
+        if len(self.td_error_history) < 2:
+            return float('inf')  # Need at least 2 samples for variance
+        # Use all available data, even if less than ideal
         return np.var(list(self.td_error_history))
     
     def compute_action_entropy(self):
         """Compute entropy of recent actions."""
-        if len(self.action_history) < 10:
-            return float('inf')  # Not enough data
+        if len(self.action_history) < 3:
+            return float('inf')  # Need at least a few samples
         
         # Discretize actions for entropy calculation
         actions = np.array(list(self.action_history))
-        # Use 10 bins for each action dimension
-        bins = np.linspace(-1, 1, 10)
+        # Use fewer bins if we have less data
+        n_bins = min(10, max(3, len(self.action_history) // 2))
+        bins = np.linspace(-1, 1, n_bins)
         digitized = np.digitize(actions, bins)
         
         # Compute entropy
@@ -269,8 +287,20 @@ class DreamingActorCritic:
         
         # Normalize each metric to [0, 1]
         pressure_trace = min(1.0, trace_sat / self.trace_saturation_threshold)
-        pressure_td = 1.0 - min(1.0, td_var / self.td_variance_threshold) if td_var < float('inf') else 0.0
-        pressure_action = 1.0 - min(1.0, action_ent / self.action_entropy_threshold) if action_ent < float('inf') else 0.0
+        
+        # For TD variance: high variance = low pressure (system is exploring/learning)
+        # Use neutral pressure (0.5) when insufficient data
+        if td_var < float('inf'):
+            pressure_td = 1.0 - min(1.0, td_var / self.td_variance_threshold)
+        else:
+            pressure_td = 0.5  # Neutral pressure when insufficient data
+        
+        # For action entropy: low entropy = high pressure (system is stuck)
+        # Use neutral pressure (0.5) when insufficient data
+        if action_ent < float('inf'):
+            pressure_action = 1.0 - min(1.0, action_ent / self.action_entropy_threshold)
+        else:
+            pressure_action = 0.5  # Neutral pressure when insufficient data
         
         # Combined pressure (max of all pressures)
         sleep_pressure = max(pressure_trace, pressure_td, pressure_action)
@@ -293,10 +323,15 @@ class DreamingActorCritic:
             'action_entropy': action_ent
         }
     
-    def should_dream(self, force_interval=None, dream_threshold=None):
+    def should_dream(self, force_interval=None, dream_threshold=None, min_episodes=5):
         """Determine if dreaming should occur."""
+        # Ensure minimum gap between dreams for metrics to accumulate
+        episodes_since_dream = self.dream_stats['episodes_since_last_dream']
+        if episodes_since_dream < min_episodes:
+            return False
+        
         # For initial testing, can force dreams every N episodes
-        if force_interval and self.dream_stats['episodes_since_last_dream'] >= force_interval:
+        if force_interval and episodes_since_dream >= force_interval:
             return True
         
         sleep_pressure, _ = self.compute_sleep_pressure()
@@ -310,12 +345,20 @@ class DreamingActorCritic:
         actor_noise_scale = self.dream_noise_sigma * np.sqrt(self.lr_a / 8e-5)  # Normalized to default LR
         critic_noise_scale = self.dream_noise_sigma * np.sqrt(self.lr_c / 2.5e-4)
         
+        # Debug: Print noise scales on first dream only
+        if not hasattr(self, '_printed_noise_debug'):
+            print(f"  Actor noise scale: {actor_noise_scale:.6f}")
+            print(f"  Critic noise scale: {critic_noise_scale:.6f}")
+            print(f"  Actor weight norm: {torch.norm(self.W_a).item():.6f}")
+            print(f"  Critic weight norm: {torch.norm(self.W_c).item():.6f}")
+            self._printed_noise_debug = True
+        
         # Add Gaussian noise to parameters
         W_a_dream = self.W_a + torch.randn_like(self.W_a) * actor_noise_scale
         W_c_dream = self.W_c + torch.randn_like(self.W_c) * critic_noise_scale
         return W_a_dream, W_c_dream
     
-    def evaluate_dream_policy(self, env, W_a_dream, W_c_dream, max_steps=200, gamma=0.96):
+    def evaluate_dream_policy(self, env, W_a_dream, W_c_dream, max_steps=200, reward_scale=1.0):
         """Evaluate a single dream policy."""
         obs_dict = env.reset()
         obs = obs_dict['obs']
@@ -324,6 +367,9 @@ class DreamingActorCritic:
         total_reward = 0
         steps = 0
         done = False
+        
+        # Debug: Track first few steps
+        debug_steps = []
         
         while not done and steps < max_steps:
             # Dream policy
@@ -336,21 +382,42 @@ class DreamingActorCritic:
             next_obs_dict, reward, done, _ = env.step(action.unsqueeze(0))
             next_obs = next_obs_dict['obs']
             
-            total_reward += reward[0].item() * (gamma ** steps)
+            # Simple sum of rewards without gamma discounting
+            # Dreams should see the same undiscounted returns as regular evaluation
+            total_reward += reward[0].item()
             steps += 1
+            
+            # Debug: Capture first few steps
+            if steps <= 5:
+                debug_steps.append({
+                    'state': state.cpu().numpy(),
+                    'action': action.item(),
+                    'reward': reward[0].item()
+                })
             
             state = next_obs[0].clone().detach().to(device=self.device, dtype=torch.float32)
         
+        # Debug: Print first evaluation details
+        if not hasattr(self, '_printed_eval_debug'):
+            print(f"\n  First dream evaluation details:")
+            for i, step in enumerate(debug_steps):
+                print(f"    Step {i+1}: state={step['state'][:2]}, action={step['action']:.3f}, reward={step['reward']:.1f}")
+            self._printed_eval_debug = True
+        
         return total_reward, steps
     
-    def dream_phase_sequential(self, env, num_dreams=8, gamma=0.96, current_episode=0):
+    def dream_phase_sequential(self, env, num_dreams=8, reward_scale=1.0, current_episode=0):
         """Execute dreaming phase with sequential parameter explorations."""
         print(f"\n💤 Entering dream phase at episode {current_episode} (after {self.dream_stats['episodes_since_last_dream']} episodes)...")
+        print(f"  Dream noise sigma: {self.dream_noise_sigma:.6f}")
+        print(f"  Learning rates: lr_a={self.lr_a:.2e}, lr_c={self.lr_c:.2e}")
+        print(f"  Reward scale: {reward_scale}")
         
         dream_results = []
         
         # Evaluate current policy first (baseline)
-        baseline_reward, baseline_steps = self.evaluate_dream_policy(env, self.W_a, self.W_c, gamma=gamma)
+        baseline_reward, baseline_steps = self.evaluate_dream_policy(env, self.W_a, self.W_c, 
+                                                                      max_steps=200, reward_scale=reward_scale)
         print(f"  Baseline performance: {baseline_reward:.1f} (in {baseline_steps} steps)")
         
         # Run sequential dreams
@@ -362,7 +429,8 @@ class DreamingActorCritic:
                 assert torch.allclose(W_a_dream, self.W_a), "Zero noise should give identical actor weights!"
                 assert torch.allclose(W_c_dream, self.W_c), "Zero noise should give identical critic weights!"
             
-            reward, steps = self.evaluate_dream_policy(env, W_a_dream, W_c_dream, gamma=gamma)
+            reward, steps = self.evaluate_dream_policy(env, W_a_dream, W_c_dream, 
+                                                       max_steps=200, reward_scale=reward_scale)
             dream_results.append({
                 'W_a_diff': W_a_dream - self.W_a,
                 'W_c_diff': W_c_dream - self.W_c,
@@ -398,22 +466,25 @@ class DreamingActorCritic:
         self.dream_noise_sigma = max(self.min_dream_noise, 
                                      self.dream_noise_sigma * self.dream_noise_decay)
         
-        # Reset all components after dreaming (like waking up refreshed)
-        if self.refresh_after_sleep:
-            print("  Resetting mental state after dream consolidation")
+        # Only reset histories if dreams were unsuccessful or if explicitly requested
+        # Successful dreams suggest the monitoring is working well
+        reset_histories = self.refresh_after_sleep and (num_successful == 0)
+        
+        if reset_histories:
+            print("  Resetting mental state after unsuccessful dreams")
             
-            # Reset eligibility traces (mental fatigue)
+            # Always reset eligibility traces after dreams
             self.reset_traces()
+            
+            # Only clear monitoring histories if dreams were completely unsuccessful
             if hasattr(self, 'trace_norm_history'):
                 self.trace_norm_history.clear()
-            
-            # Reset TD error history (frustration)
             self.td_error_history.clear()
-            
-            # Reset action history (boredom)
             self.action_history.clear()
         else:
-            print("  Keeping mental state intact (refresh disabled)")
+            # Still reset traces but keep histories
+            print("  Resetting traces but keeping monitoring histories")
+            self.reset_traces()
         
         return [d['reward'] for d in dream_results]
     
@@ -562,7 +633,7 @@ class DreamingActorCritic:
 def train(headless=True, num_episodes=500, args=None):
     # Set up run directory
     run_dir = None
-    if args and (args.save_checkpoint or args.save_metrics):
+    if args and args.save_checkpoint:
         # If save_checkpoint is a string path, use that as the directory
         if args.save_checkpoint and isinstance(args.save_checkpoint, str):
             run_dir = args.save_checkpoint
@@ -703,6 +774,10 @@ def train(headless=True, num_episodes=500, args=None):
 
     try:
         for ep in range(1, num_episodes+1):
+            # Reset environment at the start of each episode
+            obs_dict = env.reset()
+            obs = obs_dict['obs']
+            
             ac.reset_traces()
             state = obs[0].clone().detach().to(device=ac.device, dtype=torch.float32)
             done = False
@@ -735,9 +810,6 @@ def train(headless=True, num_episodes=500, args=None):
                 ac.apply_updates(delta, td_clip)
                 
                 state = next_s
-
-            obs_dict = env.reset()
-            obs = obs_dict['obs']
             
             # Track returns
             total_r_scalar = total_r.item() if torch.is_tensor(total_r) else total_r
@@ -749,7 +821,7 @@ def train(headless=True, num_episodes=500, args=None):
             ac.dream_stats['episodes_since_last_dream'] += 1
             
             # Check if we should dream
-            if ac.training_mode and not args.disable_dreams and ac.should_dream(force_dream_interval, dream_threshold):
+            if ac.training_mode and not args.disable_dreams and ac.should_dream(force_dream_interval, dream_threshold, min_episodes=args.min_episodes_between_dreams):
                 # Store performance before dreaming
                 pre_dream_avg = avg_return
                 
@@ -757,7 +829,7 @@ def train(headless=True, num_episodes=500, args=None):
                 dream_rewards = ac.dream_phase_sequential(
                     env, 
                     num_dreams=8,
-                    gamma=gamma,
+                    reward_scale=reward_scale,
                     current_episode=ep
                 )
                 
@@ -772,14 +844,15 @@ def train(headless=True, num_episodes=500, args=None):
                         'dream_rewards': dream_rewards
                     })
             
-            if ep % 10 == 0:
+            # Always print sleep pressure for debugging
+            if ac.training_mode and ep % 1 == 0:  # Every episode
+                pressure, metrics = ac.compute_sleep_pressure()
                 print(f"Episode {ep:3d}\tReturn {total_r_scalar:6.1f}\tAvg Return {avg_return:6.1f}")
-                
-                # Print sleep pressure if in training mode
-                if ac.training_mode:
-                    pressure, metrics = ac.compute_sleep_pressure()
-                    print(f"  Sleep pressure: {pressure:.2f} (mental fatigue: {metrics['trace_saturation']:.2f}, "
-                          f"frustration: {metrics['td_variance']:.3f}, boredom: {metrics['action_entropy']:.2f})")
+                print(f"  Sleep pressure: {pressure:.2f} (mental fatigue: {metrics['trace_saturation']:.2f}, "
+                      f"frustration: {metrics['td_variance']:.3f}, boredom: {metrics['action_entropy']:.2f})")
+                print(f"  Histories: TD={len(ac.td_error_history)}, Action={len(ac.action_history)}, Trace={len(ac.trace_norm_history) if hasattr(ac, 'trace_norm_history') else 0}")
+            elif ep % 10 == 0:  # Non-training mode
+                print(f"Episode {ep:3d}\tReturn {total_r_scalar:6.1f}\tAvg Return {avg_return:6.1f}")
             
             # Auto-save best model during training
             if ac.training_mode and len(returns) >= window_size:
@@ -790,14 +863,17 @@ def train(headless=True, num_episodes=500, args=None):
                         best_checkpoint_path = os.path.join(run_dir, "checkpoint_best.pth")
                         ac.save_checkpoint(best_checkpoint_path, physics_fps=physics_fps)
                         print(f"New best average return: {best_avg_return:.2f}")
-        
-        # Save checkpoint if requested
+    
+    except KeyboardInterrupt:
+        print("\n\nTraining interrupted by user. Saving progress...")
+    
+    finally:
+        # Save checkpoint and metrics if requested
         if args and args.save_checkpoint and run_dir:
             checkpoint_path = os.path.join(run_dir, "checkpoint.pth")
             ac.save_checkpoint(checkpoint_path, physics_fps=physics_fps)
-        
-        # Save metrics if requested
-        if args and args.save_metrics and run_dir:
+            
+            # Always save metrics with checkpoint
             metrics = {
                 'run_id': args.run_id,
                 'hyperparameters': {
@@ -818,8 +894,7 @@ def train(headless=True, num_episodes=500, args=None):
             with open(filename, 'w') as f:
                 json.dump(metrics, f, indent=2)
             print(f"Metrics saved to {filename}")
-    
-    finally:
+        
         # Print FPS statistics
         if not headless and frame_count > 0:
             total_time = time.time() - fps_start_time
@@ -870,10 +945,8 @@ if __name__ == "__main__":
     parser.add_argument('--td-clip', type=float, default=5.0,
                         help='TD error clipping value (default: 5.0)')
     # Output
-    parser.add_argument('--save-metrics', action='store_true',
-                        help='Save training metrics to file')
     parser.add_argument('--run-id', type=str, default='default',
-                        help='Run identifier for saving metrics')
+                        help='Run identifier for output directory')
     parser.add_argument('--best-config', action='store_true',
                         help='Use the best hyperparameters from search')
     # Checkpoint arguments
@@ -898,6 +971,8 @@ if __name__ == "__main__":
                         help='Reset traces/history after dreams (default: true)')
     parser.add_argument('--disable-dreams', action='store_true',
                         help='Disable dreaming entirely for testing')
+    parser.add_argument('--min-episodes-between-dreams', type=int, default=5,
+                        help='Minimum episodes between dreams to allow metrics to accumulate (default: 5)')
     args = parser.parse_args()
     
     # Override with best config if requested

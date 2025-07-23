@@ -17,10 +17,14 @@ def load_dream_metrics(filepath):
     return data
 
 
-def plot_dream_patterns(metrics, save_path=None, rolling_avg_len=20):
+def plot_dream_patterns(metrics, save_path=None, rolling_avg_len=20, filepath=None):
     """Create comprehensive visualization of dream patterns."""
     fig, axes = plt.subplots(2, 2, figsize=(15, 10))
     fig.suptitle('Dreaming Actor-Critic Analysis', fontsize=16)
+    
+    # Set window title
+    if filepath:
+        fig.canvas.manager.set_window_title(filepath)
     
     returns = metrics['returns']
     dream_stats = metrics.get('dream_stats', {})
@@ -448,4 +452,4 @@ if __name__ == "__main__":
         # Single file visualization
         if all_files and os.path.exists(all_files[0]):
             metrics = load_dream_metrics(all_files[0])
-            plot_dream_patterns(metrics, args.save, args.rolling_avg_len)
+            plot_dream_patterns(metrics, args.save, args.rolling_avg_len, filepath=all_files[0])
