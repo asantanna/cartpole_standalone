@@ -98,9 +98,11 @@ The best configuration achieved an average return of **67.4** over 500 episodes,
 
 ### Scripts
 - `src/cartpole.py` - Main training script with actor-critic implementation
+- `src/cartpole_dreamer.py` - Dreaming actor-critic implementation (biologically inspired)
 - `src/hyperparam_search.py` - Hyperparameter search tool
 - `src/refined_search_config.py` - Refined search spaces based on initial results
 - `src/visualize_learning.py` - Visualization tools for learning curves
+- `src/visualize_dreams.py` - Visualization for dream patterns and sleep pressure
 - `src/analyze_results.py` - Analysis tool for search results
 - `scripts/run_tests.sh` - Script to run the test suite
 
@@ -174,3 +176,13 @@ This implementation is designed for single environments only. Eligibility traces
 3. **Batch update issues**: Accumulating updates across many parallel episodes creates gradient steps that are too large and destabilize learning
 
 For parallel training with multiple environments, consider using algorithms without eligibility traces (e.g., PPO, A2C). This implementation prioritizes biological plausibility and correct temporal credit assignment over parallel training speed.
+
+### Dreaming Actor-Critic
+
+We've also implemented a biologically-inspired "dreaming" variant (`cartpole_dreamer.py`) that:
+- Monitors "sleep pressure" through eligibility trace saturation
+- Triggers dream phases when learning stagnates
+- Explores parameter variations during dreams
+- Consolidates successful dreams into the policy
+
+See `DREAMER_DESIGN.md` for detailed design and findings.

@@ -45,11 +45,15 @@ We discovered through extensive testing that eligibility traces are fundamentall
 cartpole_standalone/
 ├── src/
 │   ├── cartpole.py          # Main training script
+│   ├── cartpole_dreamer.py  # Dreaming actor-critic variant
 │   ├── hyperparam_search.py # Hyperparameter search tool
-│   └── visualize_learning.py # Learning curve visualization
+│   ├── visualize_learning.py # Learning curve visualization
+│   └── visualize_dreams.py   # Dream pattern visualization
 ├── best_runs/               # Best performing runs
 ├── runs/                    # All training runs
-└── tests/                   # Test suite
+├── tests/                   # Test suite
+├── DREAMER_DESIGN.md        # Design doc for dreaming approach
+└── CLAUDE.md                # This file
 ```
 
 ## Key Findings
@@ -82,8 +86,23 @@ pytest tests/ -v
 
 Note: Some tests require creating Isaac Gym environments and may fail if run together due to Isaac Gym limitations.
 
+## Dreaming Actor-Critic
+
+We implemented a biologically-inspired variant that incorporates "dreaming":
+- **Sleep Pressure**: Monitors eligibility trace saturation, TD variance, and action entropy
+- **Dream Trigger**: When pressure exceeds threshold, triggers parameter exploration
+- **Sequential Dreams**: Due to Isaac Gym limitations, dreams run sequentially not in parallel
+- **Consolidation**: Successful dream variations are integrated into the base policy
+
+Key findings:
+- With optimized hyperparameters, traces saturate very quickly (1-2 episodes)
+- Dreams become too frequent, occurring after nearly every episode
+- The approach shows more promise with default hyperparameters
+
 ## Future Work
 
 - Investigate alternative biologically plausible algorithms that might work with parallel environments
 - Explore curriculum learning approaches
 - Test on more complex continuous control tasks
+- Improve dream triggering to be less sensitive to trace saturation
+- Implement "dream budgets" to limit computational overhead
