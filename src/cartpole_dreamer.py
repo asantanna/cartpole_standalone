@@ -152,9 +152,10 @@ class DreamingActorCritic:
         self.refresh_after_sleep = refresh_after_sleep  # Whether to reset traces after dreams
         
         # Sleep pressure thresholds
-        self.trace_saturation_threshold = 0.8
-        self.td_variance_threshold = 0.01
-        self.action_entropy_threshold = 0.1
+        # These are calibrated for well-performing agents
+        self.trace_saturation_threshold = 0.7  # Traces near max capacity
+        self.td_variance_threshold = 1.0  # High uncertainty in value estimates  
+        self.action_entropy_threshold = 0.2  # Low exploration (normalized entropy)
         self.dream_threshold = 0.8  # Overall threshold for triggering dreams
         
         # Theoretical max norm for eligibility traces
@@ -265,25 +266,64 @@ class DreamingActorCritic:
         if len(self.action_history) < 3:
             return float('inf')  # Need at least a few samples
         
-        # Discretize actions for entropy calculation
-        actions = np.array(list(self.action_history))
-        # Use fewer bins if we have less data
-        n_bins = min(10, max(3, len(self.action_history) // 2))
-        bins = np.linspace(-1, 1, n_bins)
+        # Convert actions to flat array (handle both scalars and arrays)
+        action_list = []
+        for a in self.action_history:
+            if isinstance(a, np.ndarray):
+                action_list.append(a.item() if a.size == 1 else a[0])
+            else:
+                action_list.append(a)
+        
+        actions = np.array(action_list)
+        
+        # Use adaptive binning based on data
+        n_bins = min(10, max(3, len(actions) // 5))
+        bins = np.linspace(-1, 1, n_bins + 1)
         digitized = np.digitize(actions, bins)
         
         # Compute entropy
         unique, counts = np.unique(digitized, return_counts=True)
         probs = counts / counts.sum()
-        entropy = -np.sum(probs * np.log(probs + 1e-10))
+        # Use natural log for consistency, convert to bits if needed
+        entropy = -np.sum(probs * np.log(probs + 1e-8))
         
-        return entropy
+        # Normalize by max possible entropy for the number of bins
+        max_entropy = np.log(n_bins)
+        normalized_entropy = entropy / max_entropy if max_entropy > 0 else 0
+        
+        return normalized_entropy
     
     def compute_sleep_pressure(self):
-        """Compute combined sleep pressure from all metrics."""
+        """Compute combined sleep pressure from all metrics.
+        
+        Sleep pressure indicates when the agent needs dreams to improve learning:
+        1. Mental fatigue: Eligibility traces saturated (can't form new associations)
+        2. Frustration: High TD variance (unstable value estimates) 
+        3. Boredom: Low action entropy (stuck in repetitive behavior)
+        
+        The system adapts based on performance:
+        - Good performance → more tolerant thresholds
+        - Poor performance → more sensitive to issues
+        - Excellent performance → requires multiple factors to trigger dreams
+        """
         trace_sat = self.compute_trace_saturation()
         td_var = self.compute_td_variance()
         action_ent = self.compute_action_entropy()
+        
+        # Adapt thresholds based on recent performance
+        recent_returns = list(self.recent_returns)[-10:] if hasattr(self, 'recent_returns') else []
+        if recent_returns and len(recent_returns) >= 3:
+            avg_return = np.mean(recent_returns)
+            # For CartPole, 500 is perfect, 200 is mediocre, <100 is bad
+            performance_factor = min(1.0, avg_return / 300.0)  # 0-1 scale
+            
+            # When performing well, be more tolerant of low entropy and high variance
+            adaptive_entropy_threshold = self.action_entropy_threshold * (0.5 + 0.5 * performance_factor)
+            adaptive_variance_threshold = self.td_variance_threshold * (0.5 + 0.5 * performance_factor)
+        else:
+            # Use default thresholds when insufficient data
+            adaptive_entropy_threshold = self.action_entropy_threshold
+            adaptive_variance_threshold = self.td_variance_threshold
         
         # Normalize each metric to [0, 1]
         pressure_trace = min(1.0, trace_sat / self.trace_saturation_threshold)
@@ -291,19 +331,40 @@ class DreamingActorCritic:
         # For TD variance: high variance = low pressure (system is exploring/learning)
         # Use neutral pressure (0.5) when insufficient data
         if td_var < float('inf'):
-            pressure_td = 1.0 - min(1.0, td_var / self.td_variance_threshold)
+            pressure_td = 1.0 - min(1.0, td_var / adaptive_variance_threshold)
         else:
             pressure_td = 0.5  # Neutral pressure when insufficient data
         
         # For action entropy: low entropy = high pressure (system is stuck)
         # Use neutral pressure (0.5) when insufficient data
         if action_ent < float('inf'):
-            pressure_action = 1.0 - min(1.0, action_ent / self.action_entropy_threshold)
+            # action_ent is normalized [0,1], low values mean stuck behavior
+            if action_ent < adaptive_entropy_threshold:
+                # Scale pressure from 1.0 (at 0 entropy) to 0.0 (at threshold)
+                pressure_action = 1.0 - (action_ent / adaptive_entropy_threshold)
+            else:
+                pressure_action = 0.0  # No pressure if entropy is healthy
         else:
             pressure_action = 0.5  # Neutral pressure when insufficient data
         
-        # Combined pressure (max of all pressures)
-        sleep_pressure = max(pressure_trace, pressure_td, pressure_action)
+        # Combined pressure with performance weighting
+        # If performing well, require stronger signal to trigger dreams
+        if recent_returns and len(recent_returns) >= 3:
+            avg_return = np.mean(recent_returns)
+            if avg_return > 400:  # Excellent performance
+                # Require at least two factors or one very strong factor
+                pressures = [pressure_trace, pressure_td, pressure_action]
+                high_pressures = [p for p in pressures if p > 0.6]
+                if len(high_pressures) >= 2 or any(p > 0.9 for p in pressures):
+                    sleep_pressure = max(pressures)
+                else:
+                    sleep_pressure = max(pressures) * 0.8  # Dampen single moderate signals
+            else:
+                # Normal combination for moderate performance
+                sleep_pressure = max(pressure_trace, pressure_td, pressure_action)
+        else:
+            # Default combination when insufficient data
+            sleep_pressure = max(pressure_trace, pressure_td, pressure_action)
         
         # Store detailed metrics
         self.dream_stats['sleep_pressure_history'].append({
@@ -844,15 +905,15 @@ def train(headless=True, num_episodes=500, args=None):
                         'dream_rewards': dream_rewards
                     })
             
-            # Always print sleep pressure for debugging
-            if ac.training_mode and ep % 1 == 0:  # Every episode
-                pressure, metrics = ac.compute_sleep_pressure()
+            # Print episode results
+            if ep % 5 == 0 or (ac.training_mode and ac.dream_stats['episodes_since_last_dream'] <= 1):
                 print(f"Episode {ep:3d}\tReturn {total_r_scalar:6.1f}\tAvg Return {avg_return:6.1f}")
-                print(f"  Sleep pressure: {pressure:.2f} (mental fatigue: {metrics['trace_saturation']:.2f}, "
-                      f"frustration: {metrics['td_variance']:.3f}, boredom: {metrics['action_entropy']:.2f})")
-                print(f"  Histories: TD={len(ac.td_error_history)}, Action={len(ac.action_history)}, Trace={len(ac.trace_norm_history) if hasattr(ac, 'trace_norm_history') else 0}")
-            elif ep % 10 == 0:  # Non-training mode
-                print(f"Episode {ep:3d}\tReturn {total_r_scalar:6.1f}\tAvg Return {avg_return:6.1f}")
+                
+                # Print sleep pressure if in training mode
+                if ac.training_mode:
+                    pressure, metrics = ac.compute_sleep_pressure()
+                    print(f"  Sleep pressure: {pressure:.2f} (fatigue: {metrics['trace_saturation']:.2f}, "
+                          f"frustration: {metrics['td_variance']:.3f}, boredom: {metrics['action_entropy']:.2f})")
             
             # Auto-save best model during training
             if ac.training_mode and len(returns) >= window_size:
