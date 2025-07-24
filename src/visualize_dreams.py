@@ -10,12 +10,86 @@ import os
 import glob
 
 
-def load_dream_metrics(filepath):
-    """Load metrics containing dream statistics."""
-    with open(filepath, 'r') as f:
+def load_dream_metrics(path):
+    """Load metrics containing dream statistics from file or directory."""
+    # If it's a directory, look for metrics.json inside
+    if os.path.isdir(path):
+        metrics_file = os.path.join(path, 'metrics.json')
+        if os.path.exists(metrics_file):
+            path = metrics_file
+        else:
+            raise FileNotFoundError(f"No metrics.json found in {path}")
+    
+    with open(path, 'r') as f:
         data = json.load(f)
     return data
 
+
+def text_only_dream_analysis(metrics, filepath=None):
+    """Output all graph data in text format for analysis."""
+    returns = metrics['returns']
+    dream_stats = metrics.get('dream_stats', {})
+    episodes = list(range(1, len(returns) + 1))
+    
+    print("\n" + "="*80)
+    print("DREAM VISUALIZATION DATA (TEXT FORMAT)")
+    print("="*80)
+    
+    # Graph 1: Learning Progress with Dream Markers
+    print("\nGraph 1: Learning Progress with Dream Markers")
+    print("="*50)
+    print(f"{'Episode':<10} {'Return':<10} {'Dream':<10}")
+    print("-"*30)
+    
+    dream_episodes = dream_stats.get('dream_episodes', [])
+    for i, (ep, ret) in enumerate(zip(episodes, returns)):
+        is_dream = 'YES' if ep in dream_episodes else ''
+        print(f"{ep:<10} {ret:<10.1f} {is_dream:<10}")
+    
+    # Graph 2: Sleep Pressure Components
+    print("\n\nGraph 2: Sleep Pressure Components Over Time")
+    print("="*50)
+    sleep_history = dream_stats.get('sleep_pressure_history', [])
+    if sleep_history:
+        print(f"{'Episode':<10} {'TraceSat':<12} {'TDVar':<12} {'ActEntropy':<12} {'Combined':<12}")
+        print("-"*60)
+        for entry in sleep_history:
+            ep = entry.get('episode', 0)
+            trace = entry.get('trace_saturation', 0)
+            td_var = entry.get('td_variance', 0)
+            entropy = entry.get('action_entropy', 0)
+            combined = entry.get('combined_pressure', 0)
+            print(f"{ep:<10} {trace:<12.3f} {td_var:<12.3f} {entropy:<12.3f} {combined:<12.3f}")
+    
+    # Graph 3: Dream Analysis
+    print("\n\nGraph 3: Dream Analysis Summary")
+    print("="*50)
+    dream_history = dream_stats.get('dream_history', [])
+    if dream_history:
+        print(f"Total dream phases: {len(dream_history)}")
+        for i, dream in enumerate(dream_history):
+            print(f"\nDream Phase {i+1} (Episode {dream.get('episode', 'N/A')}):")
+            print(f"  Pre-dream average: {dream.get('pre_dream_avg', 0):.1f}")
+            print(f"  Post-dream average: {dream.get('post_dream_avg', 0):.1f}")
+            print(f"  Dream rewards: {dream.get('dream_rewards', [])}")
+            print(f"  Improvement: {dream.get('post_dream_avg', 0) - dream.get('pre_dream_avg', 0):.1f}")
+    
+    # Graph 4: Sleep Pressure vs Performance
+    print("\n\nGraph 4: Sleep Pressure vs Performance Correlation")
+    print("="*50)
+    if sleep_history and len(returns) > 0:
+        print(f"{'Return':<15} {'SleepPressure':<15}")
+        print("-"*30)
+        for entry in sleep_history:
+            ep_idx = entry.get('episode', 1) - 1
+            if 0 <= ep_idx < len(returns):
+                ret = returns[ep_idx]
+                pressure = entry.get('combined_pressure', 0)
+                print(f"{ret:<15.1f} {pressure:<15.3f}")
+    
+    print("\n" + "="*80)
+    print("END OF TEXT ANALYSIS")
+    print("="*80 + "\n")
 
 def plot_dream_patterns(metrics, save_path=None, rolling_avg_len=20, filepath=None):
     """Create comprehensive visualization of dream patterns."""
@@ -404,6 +478,8 @@ if __name__ == "__main__":
                         help='Print analysis summary')
     parser.add_argument('--rolling-avg-len', type=int, default=20,
                         help='Window size for rolling average (default: 20)')
+    parser.add_argument('--text-only', action='store_true',
+                        help='Output text-only analysis instead of graphs (useful for LLMs)')
     
     args = parser.parse_args()
     
@@ -452,4 +528,7 @@ if __name__ == "__main__":
         # Single file visualization
         if all_files and os.path.exists(all_files[0]):
             metrics = load_dream_metrics(all_files[0])
-            plot_dream_patterns(metrics, args.save, args.rolling_avg_len, filepath=all_files[0])
+            if args.text_only:
+                text_only_dream_analysis(metrics, filepath=all_files[0])
+            else:
+                plot_dream_patterns(metrics, args.save, args.rolling_avg_len, filepath=all_files[0])

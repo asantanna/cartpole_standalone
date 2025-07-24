@@ -209,3 +209,5 @@ __marimo__/
 # for Cartpole standalone runs
 # Ignore run directories to avoid cluttering with temporary files
 runs/*
+recovery_tests/*
+

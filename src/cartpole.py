@@ -91,8 +91,10 @@ class ActorCritic:
     def __init__(self, obs_dim, act_dim,
                  lr_a=8e-5, lr_c=2.5e-4,
                  lambda_a=0.88, lambda_c=0.92,
-                 noise_std=0.05, device='cuda:0'):
+                 noise_std=0.05, device='cuda:0',
+                 grad_clip_norm=50.0):
         self.device = torch.device(device)
+        self.grad_clip_norm = grad_clip_norm
         # weights - Xavier initialization
         self.W_a = torch.randn(act_dim, obs_dim, device=self.device) * np.sqrt(2.0 / (act_dim + obs_dim))
         self.W_c = torch.randn(1,       obs_dim, device=self.device) * np.sqrt(2.0 / (1 + obs_dim))
@@ -125,11 +127,43 @@ class ActorCritic:
     def reset_traces(self):
         self.e_a.zero_(); self.e_c.zero_()
 
-    def update_traces(self, s, a):
+    def update_traces(self, s, a, mean):
         if self.training_mode:
-            # For continuous actions, gradient is simpler
-            # actor trace - gradient of tanh(W_a @ s) w.r.t W_a
-            grad_log = (1 - a**2).unsqueeze(1) * s.unsqueeze(0)
+            # Proper stochastic policy gradient for continuous actions
+            # For Gaussian policy: ∇ log π(a|s) = (a - μ)/σ² * ∇μ
+            std = torch.exp(self.log_std)
+            
+            # Diagnostic: Print gradient components
+            action_diff = a - mean
+            variance = std**2
+            grad_scale = action_diff / variance
+            
+            # Print diagnostics every 100 steps
+            if hasattr(self, '_trace_update_count'):
+                self._trace_update_count += 1
+            else:
+                self._trace_update_count = 1
+                
+            if self._trace_update_count % 100 == 0:
+                print(f"\n--- Gradient Diagnostics (step {self._trace_update_count}) ---")
+                print(f"  σ (std): {std.mean().item():.6f}")
+                print(f"  σ² (variance): {variance.mean().item():.6f}")
+                print(f"  (a - μ): {action_diff.abs().mean().item():.6f}")
+                print(f"  (a - μ)/σ²: {grad_scale.abs().mean().item():.2f}")
+                print(f"  Amplification factor: {(1.0/variance.mean()).item():.1f}x")
+            
+            # Gradient of mean w.r.t weights: ∇μ = (1 - tanh²) * s
+            grad_mean = (1 - mean**2).unsqueeze(1) * s.unsqueeze(0)
+            
+            # Full policy gradient: (a - μ)/σ² * ∇μ
+            grad_log = grad_scale.unsqueeze(1) * grad_mean
+            
+            # Diagnostic: Print gradient norm
+            if self._trace_update_count % 100 == 0:
+                grad_norm = torch.norm(grad_log)
+                print(f"  Policy gradient norm: {grad_norm.item():.2f}")
+            
+            # Update actor trace
             self.e_a.mul_(self.lambda_a)
             self.e_a.add_(grad_log)
 
@@ -141,6 +175,39 @@ class ActorCritic:
         # three-factor updates with gradient clipping
         if self.training_mode:
             delta = torch.clamp(delta, -td_clip, td_clip)  # Clip TD error
+            
+            # Apply gradient norm clipping to eligibility traces
+            actor_clipped = False
+            critic_clipped = False
+            
+            if self.grad_clip_norm > 0:
+                # Clip actor trace
+                actor_trace_norm = torch.norm(self.e_a)
+                if actor_trace_norm > self.grad_clip_norm:
+                    self.e_a = self.e_a * (self.grad_clip_norm / actor_trace_norm)
+                    actor_clipped = True
+                
+                # Clip critic trace
+                critic_trace_norm = torch.norm(self.e_c)
+                if critic_trace_norm > self.grad_clip_norm:
+                    self.e_c = self.e_c * (self.grad_clip_norm / critic_trace_norm)
+                    critic_clipped = True
+            
+            # Diagnostic: Print update magnitudes every 100 steps
+            if hasattr(self, '_trace_update_count') and self._trace_update_count % 100 == 0:
+                actor_trace_norm = torch.norm(self.e_a)
+                critic_trace_norm = torch.norm(self.e_c)
+                actor_update_norm = torch.norm(self.lr_a * delta * self.e_a)
+                critic_update_norm = torch.norm(self.lr_c * delta * self.e_c)
+                
+                print(f"  TD error (δ): {delta.item():.4f}")
+                print(f"  Actor trace norm: {actor_trace_norm.item():.2f} {'[CLIPPED]' if actor_clipped else ''}")
+                print(f"  Critic trace norm: {critic_trace_norm.item():.2f} {'[CLIPPED]' if critic_clipped else ''}")
+                print(f"  Actor update norm: {actor_update_norm.item():.6f}")
+                print(f"  Critic update norm: {critic_update_norm.item():.6f}")
+                print(f"  Actor weights norm: {torch.norm(self.W_a).item():.2f}")
+                print("---")
+            
             self.W_a +=  self.lr_a * delta * self.e_a
             self.W_c +=  self.lr_c * delta * self.e_c
     
@@ -312,6 +379,39 @@ def train(headless=True, num_episodes=500, args=None):
             # Load checkpoint (hyperparameters are now updated inside load_checkpoint)
             loaded_params, loaded_physics_fps = ac.load_checkpoint(checkpoint_path)
             
+            # If load_hparams_only is set, reinitialize the weights
+            if args.load_hparams_only:
+                print("Reinitializing weights (keeping only hyperparameters from checkpoint)")
+                # Reinitialize weights with Xavier initialization
+                ac.W_a = torch.randn(act_dim, obs_dim, device=ac.device) * np.sqrt(2.0 / (act_dim + obs_dim))
+                ac.W_c = torch.randn(1, obs_dim, device=ac.device) * np.sqrt(2.0 / (1 + obs_dim))
+                # Reset eligibility traces
+                ac.e_a = torch.zeros_like(ac.W_a)
+                ac.e_c = torch.zeros_like(ac.W_c)
+                # Set training mode to True when loading hparams only
+                ac.training_mode = True
+            
+            # If disturb_weights is set, add noise to the loaded weights
+            if args.disturb_weights is not None and not args.load_hparams_only:
+                noise_std = args.disturb_weights
+                print(f"Disturbing weights with Gaussian noise (std={noise_std})")
+                
+                # Add noise to actor and critic weights
+                ac.W_a += torch.randn_like(ac.W_a) * noise_std
+                ac.W_c += torch.randn_like(ac.W_c) * noise_std
+                
+                # Optionally disturb log_std as well (small amount)
+                ac.log_std += torch.randn_like(ac.log_std) * noise_std * 0.1
+                
+                # Reset traces after disturbance
+                ac.e_a = torch.zeros_like(ac.W_a)
+                ac.e_c = torch.zeros_like(ac.W_c)
+                
+                # Set training mode to True
+                ac.training_mode = True
+                
+                print(f"Weights disturbed. Actor norm: {torch.norm(ac.W_a).item():.4f}, Critic norm: {torch.norm(ac.W_c).item():.4f}")
+            
             # Check physics FPS compatibility
             if loaded_physics_fps != physics_fps:
                 print(f"WARNING: Environment physics FPS ({physics_fps}) doesn't match checkpoint ({loaded_physics_fps})")
@@ -328,7 +428,7 @@ def train(headless=True, num_episodes=500, args=None):
             ac = ActorCritic(obs_dim=obs_dim, act_dim=act_dim, device=device,
                             lr_a=args.lr_actor, lr_c=args.lr_critic,
                             lambda_a=args.lambda_actor, lambda_c=args.lambda_critic,
-                            noise_std=args.noise_std)
+                            noise_std=args.noise_std, grad_clip_norm=args.grad_clip_norm)
             gamma = args.gamma
             reward_scale = args.reward_scale
             td_clip = args.td_clip
@@ -394,10 +494,10 @@ def train(headless=True, num_episodes=500, args=None):
                 if debug_timing:
                     timing_stats['td_compute'].append(time.time() - t0)
                 
-                # traces & updates (use mean for gradient)
+                # traces & updates with proper stochastic policy gradient
                 if debug_timing:
                     t0 = time.time()
-                ac.update_traces(state, mean)
+                ac.update_traces(state, action, mean)
                 ac.apply_updates(delta, td_clip)
                 if debug_timing:
                     timing_stats['update'].append(time.time() - t0)
@@ -442,17 +542,18 @@ def train(headless=True, num_episodes=500, args=None):
             ac.save_checkpoint(checkpoint_path, physics_fps=physics_fps)
             
             # Always save metrics with checkpoint
+            # Use actual hyperparameters from the AC object (in case they were loaded from checkpoint)
             metrics = {
                 'run_id': args.run_id,
                 'hyperparameters': {
-                    'lr_actor': args.lr_actor,
-                    'lr_critic': args.lr_critic,
-                    'lambda_actor': args.lambda_actor,
-                    'lambda_critic': args.lambda_critic,
-                    'noise_std': args.noise_std,
-                    'gamma': args.gamma,
-                    'reward_scale': args.reward_scale,
-                    'td_clip': args.td_clip
+                    'lr_actor': ac.lr_a,
+                    'lr_critic': ac.lr_c,
+                    'lambda_actor': ac.lambda_a,
+                    'lambda_critic': ac.lambda_c,
+                    'noise_std': torch.exp(ac.log_std).item(),
+                    'gamma': gamma,
+                    'reward_scale': reward_scale,
+                    'td_clip': td_clip
                 },
                 'returns': returns,
                 'final_avg_return': np.mean(returns[-50:]) if len(returns) >= 50 else np.mean(returns)
@@ -521,13 +622,17 @@ if __name__ == "__main__":
                         help='Reward scaling divisor (default: 10.0)')
     parser.add_argument('--td-clip', type=float, default=5.0,
                         help='TD error clipping value (default: 5.0)')
+    parser.add_argument('--grad-clip-norm', type=float, default=50.0,
+                        help='Gradient norm clipping threshold, 0 to disable (default: 50.0)')
     # Output
     parser.add_argument('--run-id', type=str, default='default',
                         help='Run identifier for output directory')
     parser.add_argument('--out-dir', type=str, default=None,
                         help='Output directory for saving results (default: runs/singles)')
-    parser.add_argument('--best-config', action='store_true',
-                        help='Use the best hyperparameters from search')
+    parser.add_argument('--load-hparams-only', action='store_true',
+                        help='Load only hyperparameters from checkpoint, not weights (use with --load-checkpoint)')
+    parser.add_argument('--disturb-weights', type=float, default=None,
+                        help='Add Gaussian noise with this std dev to loaded weights (use with --load-checkpoint)')
     # Checkpoint arguments
     parser.add_argument('--save-checkpoint', action='store_true',
                         help='Save checkpoint after training to run directory')
@@ -542,17 +647,5 @@ if __name__ == "__main__":
     parser.add_argument('--debug-loop-timing', action='store_true',
                         help='Show detailed timing information for loop components')
     args = parser.parse_args()
-    
-    # Override with best config if requested
-    if args.best_config:
-        args.lr_actor = 7.93676080244564e-05
-        args.lr_critic = 0.00023467499600008876
-        args.lambda_actor = 0.8756946618682102
-        args.lambda_critic = 0.9156406148267633
-        args.noise_std = 0.02340585371545556
-        args.gamma = 0.9632491659519583
-        args.reward_scale = 12.941425759749812
-        args.td_clip = 5.381298599089067
-        print("Using best configuration from hyperparameter search")
     
     train(headless=not args.visual, num_episodes=args.num_episodes, args=args)

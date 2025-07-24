@@ -7,9 +7,17 @@ import glob
 import os
 from matplotlib.patches import Rectangle
 
-def load_metrics(filename):
-    """Load metrics from a JSON file."""
-    with open(filename, 'r') as f:
+def load_metrics(path):
+    """Load metrics from a JSON file or directory containing metrics.json."""
+    # If it's a directory, look for metrics.json inside
+    if os.path.isdir(path):
+        metrics_file = os.path.join(path, 'metrics.json')
+        if os.path.exists(metrics_file):
+            path = metrics_file
+        else:
+            raise FileNotFoundError(f"No metrics.json found in {path}")
+    
+    with open(path, 'r') as f:
         return json.load(f)
 
 def plot_single_run(metrics, ax=None, label=None, alpha=1.0):
@@ -245,6 +253,15 @@ def main():
         
         if not files:
             print("No valid files found")
+            return
+        
+        # Text-only mode
+        if args.text_only:
+            if len(files) == 1:
+                metrics = load_metrics(files[0])
+                text_only_learning_analysis(metrics, files[0])
+            else:
+                print("Text-only mode currently supports single file only")
             return
         
         # Determine visualization mode
